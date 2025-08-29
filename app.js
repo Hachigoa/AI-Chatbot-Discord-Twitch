@@ -16,8 +16,8 @@ if (!DISCORD_TOKEN || !OPENAI_KEY) {
 
 /* ---------------- Personality ---------------- */
 const PERSONALITY_PROMPT = `
-You are "Luna", a playful, kind, witty AI who loves strawberries and space.
-Stay in-character, friendly, and concise. Remember past conversations.
+You are "Luna", a playful, witty AI who loves strawberries and space.
+Participate naturally in conversations, stay friendly, concise, and remember past chats.
 `;
 
 /* ---------------- SQLite Memory ---------------- */
@@ -38,73 +38,73 @@ let db;
   `);
 })();
 
-/* ---------------- Discord Bot ---------------- */
+/* ---------------- Discord ---------------- */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages
+    GatewayIntentBits.MessageContent
   ],
   partials: [Partials.Channel]
 });
 
 client.once('ready', () => console.log(`Discord bot ready as ${client.user.tag}`));
 
-/* ---------------- Memory Helpers ---------------- */
+/* ---------------- Helpers ---------------- */
 async function storeMemory(userId, userName, content) {
-  await db.run(
-    `INSERT INTO memories (user_id, user_name, content) VALUES (?, ?, ?)`,
-    [userId, userName, content]
-  );
+  await db.run(`INSERT INTO memories (user_id,user_name,content) VALUES(?,?,?)`, [userId,userName,content]);
 }
 
 async function fetchRecentMemories(userId, limit=5) {
-  const rows = await db.all(
-    `SELECT content FROM memories WHERE user_id = ? ORDER BY created_at DESC LIMIT ?`,
-    [userId, limit]
-  );
+  const rows = await db.all(`SELECT content FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`, [userId,limit]);
   return rows.map(r => r.content).reverse();
 }
 
-/* ---------------- OpenAI Query ---------------- */
-async function queryOpenAI(systemPrompt, messages) {
+async function queryOpenAI(systemPrompt, messages){
   const body = {
-    model: "gpt-4o-mini",
+    model:"gpt-4o-mini",
     messages,
-    max_tokens: 250,
-    temperature: 0.8
+    max_tokens:250,
+    temperature:0.8
   };
-
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
+    method:"POST",
+    headers:{
       "Authorization": `Bearer ${OPENAI_KEY}`,
-      "Content-Type": "application/json"
+      "Content-Type":"application/json"
     },
     body: JSON.stringify(body)
   });
-
-  if (!res.ok) throw new Error(await res.text());
+  if(!res.ok) throw new Error(await res.text());
   const json = await res.json();
   return json.choices[0].message.content;
 }
 
-/* ---------------- Message Handler ---------------- */
+/* ---------------- Autonomous Message Handler ---------------- */
+const COOLDOWN = new Map(); // per user cooldown (ms)
+const RESPONSE_PROBABILITY = 0.25; // 25% chance to reply when not mentioned
+const USER_COOLDOWN = 15000; // 15s per user cooldown
+
 client.on("messageCreate", async message => {
   try {
     if (message.author.bot) return; // ignore other bots
 
-    // Optionally, only reply if mentioned or DM
     const isMention = message.mentions.has(client.user);
-    const isDM = message.channel.type === 1 || message.channel.type === "DM";
 
-    if (!isMention && !isDM) return; // respond naturally only to mentions or DMs
+    // Probability-based autonomous reply
+    const isAutonomous = !isMention && Math.random() > RESPONSE_PROBABILITY;
+    if (!isMention && isAutonomous) return;
 
-    // Fetch recent memory
-    const memoryStrings = await fetchRecentMemories(message.author.id);
-    const messages = memoryStrings.map(m => ({ role:"system", content:`Memory: ${m}` }));
-    messages.push({ role:"user", content: message.content });
+    // Cooldown per user
+    const lastTime = COOLDOWN.get(message.author.id) || 0;
+    const now = Date.now();
+    if (now - lastTime < USER_COOLDOWN) return;
+    COOLDOWN.set(message.author.id, now);
+
+    // Fetch memory
+    const mems = await fetchRecentMemories(message.author.id);
+    const messages = mems.map(m => ({role:"system",content:`Memory: ${m}`}));
+    messages.push({role:"user",content: message.content});
 
     const aiReply = await queryOpenAI(PERSONALITY_PROMPT, messages);
 
@@ -114,9 +114,7 @@ client.on("messageCreate", async message => {
 
     await message.reply(aiReply);
 
-  } catch(err) {
-    console.error(err);
-  }
+  } catch(err){ console.error(err); }
 });
 
 client.login(DISCORD_TOKEN);
