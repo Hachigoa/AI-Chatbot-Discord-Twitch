@@ -7,10 +7,10 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
-const OPENAI_KEY = process.env.OPENAI_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-if (!DISCORD_TOKEN || !OPENAI_KEY) {
-  console.error("Set DISCORD_BOT_TOKEN and OPENAI_API_KEY in env.");
+if (!DISCORD_TOKEN || !GEMINI_API_KEY) {
+  console.error("Set DISCORD_BOT_TOKEN and GEMINI_API_KEY in env.");
   process.exit(1);
 }
 
@@ -60,24 +60,24 @@ async function fetchRecentMemories(userId, limit=5) {
   return rows.map(r => r.content).reverse();
 }
 
-async function queryOpenAI(systemPrompt, messages){
-  const body = {
-    model:"gpt-4o-mini",
-    messages,
-    max_tokens:250,
-    temperature:0.8
-  };
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method:"POST",
-    headers:{
-      "Authorization": `Bearer ${OPENAI_KEY}`,
-      "Content-Type":"application/json"
+/* ---------------- Gemini Query ---------------- */
+async function queryGemini(prompt) {
+  const res = await fetch("https://api.generativeai.google/v1beta2/models/text-bison-001:generate", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${GEMINI_API_KEY}`,
+      "Content-Type": "application/json"
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify({
+      prompt: prompt,
+      maxOutputTokens: 250,
+      temperature: 0.8
+    })
   });
-  if(!res.ok) throw new Error(await res.text());
+
+  if (!res.ok) throw new Error(await res.text());
   const json = await res.json();
-  return json.choices[0].message.content;
+  return json.candidates[0].content;
 }
 
 /* ---------------- Autonomous Message Handler ---------------- */
@@ -103,16 +103,20 @@ client.on("messageCreate", async message => {
 
     // Fetch memory
     const mems = await fetchRecentMemories(message.author.id);
-    const messages = mems.map(m => ({role:"system",content:`Memory: ${m}`}));
-    messages.push({role:"user",content: message.content});
+    const fullPrompt = PERSONALITY_PROMPT + "\n" + mems.map(m => `Memory: ${m}`).join("\n") + "\nUser: " + message.content;
 
-    const aiReply = await queryOpenAI(PERSONALITY_PROMPT, messages);
+    const aiReply = await queryGemini(fullPrompt);
 
     // Store memory
     await storeMemory(message.author.id, message.author.username, message.content);
     await storeMemory(message.author.id, message.author.username, `Luna: ${aiReply}`);
 
     await message.reply(aiReply);
+
+  } catch(err){ console.error(err); }
+});
+
+client.login(DISCORD_TOKEN);
 
   } catch(err){ console.error(err); }
 });
