@@ -55,7 +55,7 @@ async function fetchRecentMemories(userId, limit = 5) {
 /* ---------------- Gemini Query ---------------- */
 async function queryGemini(prompt) {
   const res = await fetch(
-    "https://api.generativeai.google/v1beta2/models/text-bison-001:generate",
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
     {
       method: "POST",
       headers: {
