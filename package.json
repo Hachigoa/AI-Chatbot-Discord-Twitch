@@ -11,6 +11,6 @@
     "tmi.js": "^1.8.5",
     "openai": "^4.0.0",
     "dotenv": "^16.0.3",
-    "sqlite3": "^5.1.6"   // ✅ replaced sqlite with sqlite3
+    "sqlite3": "^5.1.6"   
   }
 }
