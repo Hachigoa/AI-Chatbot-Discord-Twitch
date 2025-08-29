@@ -1,152 +1,90 @@
+
+
 // app.js
-import { Client, GatewayIntentBits, Partials } from "discord.js";
-import sqlite3 from "sqlite3";
-import { open } from "sqlite";
-import fetch from "node-fetch";
-import express from "express";
-import dotenv from "dotenv";
-import pkg from "google-auth-library";
+import 'dotenv/config';
+import { Client, GatewayIntentBits } from 'discord.js';
+import express from 'express';
+import sqlite3 from 'sqlite3';
+import { open } from 'sqlite';
+import fetch from 'node-fetch';
+import { GoogleAuth } from 'google-auth-library';
 
-const { google } = pkg;
-dotenv.config();
+// ---------- EXPRESS SERVER ----------
+const app = express();
+const PORT = process.env.PORT || 10000;
 
-const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
-const GEMINI_CREDENTIALS_JSON = process.env.GEMINI_CREDENTIALS_JSON;
+app.get('/', (req, res) => {
+  res.send('Bot server is running!');
+});
 
-if (!DISCORD_TOKEN || !GEMINI_CREDENTIALS_JSON) {
-  console.error("Set DISCORD_BOT_TOKEN and GEMINI_CREDENTIALS_JSON in env.");
-  process.exit(1);
-}
+app.listen(PORT, () => {
+  console.log(`Web server running on port ${PORT}`);
+});
 
-const PERSONALITY_PROMPT = `
-You are "Luna", a playful, witty AI who loves strawberries and space.
-Participate naturally in conversations, stay friendly, concise, and remember past chats.
-`;
-
-/* ---------------- SQLite Memory ---------------- */
+// ---------- SQLITE DATABASE ----------
 let db;
 (async () => {
   db = await open({
-    filename: "./memory.db",
-    driver: sqlite3.Database,
+    filename: './database.sqlite',
+    driver: sqlite3.Database
   });
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS memories (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id TEXT,
-      user_name TEXT,
-      content TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-  console.log("Connected to SQLite database");
+  console.log('Connected to SQLite database');
 })();
 
-/* ---------------- Discord Client ---------------- */
+// ---------- GOOGLE GEMINI SETUP ----------
+const credentials = JSON.parse(process.env.GEMINI_CREDENTIALS_JSON);
+
+const auth = new GoogleAuth({
+  credentials: credentials,
+  scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+});
+
+async function queryGemini(prompt) {
+  try {
+    const client = await auth.getClient();
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${(await client.getAccessToken()).token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        prompt: { text: prompt },
+        temperature: 0.7,
+        candidateCount: 1
+      })
+    });
+    const data = await res.json();
+    return data.candidates?.[0]?.content?.[0]?.text || "No response";
+  } catch (err) {
+    console.error('Gemini query error:', err);
+    return 'Error connecting to Gemini API';
+  }
+}
+
+// ---------- DISCORD BOT ----------
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
-  partials: [Partials.Channel],
+    GatewayIntentBits.MessageContent
+  ]
 });
 
-client.once("ready", () => console.log(`Discord bot ready as ${client.user.tag}`));
+client.once('clientReady', () => {
+  console.log(`Discord bot ready as ${client.user.tag}`);
+});
 
-/* ---------------- Helpers ---------------- */
-async function storeMemory(userId, userName, content) {
-  await db.run(
-    `INSERT INTO memories (user_id,user_name,content) VALUES(?,?,?)`,
-    [userId, userName, content]
-  );
-}
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
 
-async function fetchRecentMemories(userId, limit = 5) {
-  const rows = await db.all(
-    `SELECT content FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`,
-    [userId, limit]
-  );
-  return rows.map((r) => r.content).reverse();
-}
-
-/* ---------------- Gemini Query ---------------- */
-async function queryGemini(prompt) {
-  const credentials = JSON.parse(GEMINI_CREDENTIALS_JSON);
-  const clientAuth = new google.auth.GoogleAuth({
-    credentials,
-    scopes: ["https://www.googleapis.com/auth/cloud-platform"],
-  });
-  const accessToken = await clientAuth.getAccessToken();
-
-  const res = await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify({
-        prompt: { text: prompt },
-        maxOutputTokens: 250,
-        temperature: 0.8,
-      }),
-    }
-  );
-
-  if (!res.ok) throw new Error(await res.text());
-  const data = await res.json();
-  return data.candidates[0].content || "Sorry, I couldn't generate a reply.";
-}
-
-/* ---------------- Discord Message Handler ---------------- */
-const COOLDOWN = new Map();
-const RESPONSE_PROBABILITY = 0.25;
-const USER_COOLDOWN = 15000;
-
-client.on("messageCreate", async (message) => {
-  try {
-    if (message.author.bot) return;
-
-    const isMention = message.mentions.has(client.user);
-    const isAutonomous = !isMention && Math.random() < RESPONSE_PROBABILITY;
-    if (!isMention && !isAutonomous) return;
-
-    const lastTime = COOLDOWN.get(message.author.id) || 0;
-    const now = Date.now();
-    if (now - lastTime < USER_COOLDOWN) return;
-    COOLDOWN.set(message.author.id, now);
-
-    const mems = await fetchRecentMemories(message.author.id);
-    const fullPrompt =
-      PERSONALITY_PROMPT +
-      "\n" +
-      mems.map((m) => `Memory: ${m}`).join("\n") +
-      "\nUser: " +
-      message.content;
-
-    const aiReply = await queryGemini(fullPrompt);
-
-    await storeMemory(message.author.id, message.author.username, message.content);
-    await storeMemory(message.author.id, message.author.username, `Luna: ${aiReply}`);
-
-    await message.reply(aiReply);
-  } catch (err) {
-    console.error(err);
+  if (message.content.startsWith('!ask ')) {
+    const prompt = message.content.slice(5);
+    const reply = await queryGemini(prompt);
+    message.reply(reply);
   }
 });
 
-/* ---------------- Discord Login ---------------- */
-client.login(DISCORD_TOKEN);
-
-/* ---------------- Minimal Web Server ---------------- */
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.get("/", (req, res) => {
-  res.send("Luna Discord Bot is running!");
-});
-
-app.listen(PORT, () => console.log(`Web server running on port ${PORT}`));
-
+// ---------- LOGIN ----------
+client.login(process.env.DISCORD_TOKEN);
