@@ -1,9 +1,10 @@
+// app.js
 import { Client, GatewayIntentBits, Partials } from "discord.js";
 import sqlite3 from "sqlite3";
+import { open } from "sqlite";
 import fetch from "node-fetch";
 import express from "express";
 import dotenv from "dotenv";
-import { promisify } from "util";
 
 dotenv.config();
 
@@ -11,7 +12,7 @@ const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 if (!DISCORD_TOKEN || !GEMINI_API_KEY) {
-  console.error("Set DISCORD_BOT_TOKEN and GEMINI_API_KEY in env.");
+  console.error("Set DISCORD_BOT_TOKEN and GEMINI_API_KEY in your .env file.");
   process.exit(1);
 }
 
@@ -22,70 +23,73 @@ Participate naturally in conversations, stay friendly, concise, and remember pas
 `;
 
 /* ---------------- SQLite Memory ---------------- */
-const db = new sqlite3.Database('./memory.db', (err) => {
-  if (err) return console.error(err.message);
+let db;
+(async () => {
+  db = await open({
+    filename: './memory.db',
+    driver: sqlite3.Database
+  });
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS memories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT,
+      user_name TEXT,
+      content TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
   console.log("Connected to SQLite database");
-});
-
-db.run(`
-  CREATE TABLE IF NOT EXISTS memories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT,
-    user_name TEXT,
-    content TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-`);
-
-const dbRun = promisify(db.run.bind(db));
-const dbAll = promisify(db.all.bind(db));
-
-async function storeMemory(userId, userName, content) {
-  await dbRun(`INSERT INTO memories (user_id,user_name,content) VALUES(?,?,?)`, [userId, userName, content]);
-}
-
-async function fetchRecentMemories(userId, limit = 5) {
-  const rows = await dbAll(
-    `SELECT content FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`,
-    [userId, limit]
-  );
-  return rows.map(r => r.content).reverse();
-}
-
-/* ---------------- Gemini Query ---------------- */
-async function queryGemini(prompt) {
-  const res = await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
-    {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${GEMINI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        prompt: prompt,
-        maxOutputTokens: 250,
-        temperature: 0.8
-      })
-    }
-  );
-
-  if (!res.ok) throw new Error(await res.text());
-  const json = await res.json();
-  return json.candidates[0].content;
-}
+})();
 
 /* ---------------- Discord Client ---------------- */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent // Make sure this intent is enabled in Discord portal
+    GatewayIntentBits.MessageContent
   ],
   partials: [Partials.Channel]
 });
 
 client.once('ready', () => console.log(`Discord bot ready as ${client.user.tag}`));
+
+/* ---------------- Helpers ---------------- */
+async function storeMemory(userId, userName, content) {
+  await db.run(`INSERT INTO memories (user_id,user_name,content) VALUES(?,?,?)`, [userId,userName,content]);
+}
+
+async function fetchRecentMemories(userId, limit=5) {
+  const rows = await db.all(`SELECT content FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`, [userId,limit]);
+  return rows.map(r => r.content).reverse();
+}
+
+/* ---------------- Gemini Query ---------------- */
+async function queryGemini(prompt) {
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
+
+  const body = {
+    prompt: { text: prompt },
+    temperature: 0.8,
+    maxOutputTokens: 250
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${GEMINI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Gemini API error: ${errText}`);
+  }
+
+  const data = await res.json();
+  return data.candidates[0].content;
+}
 
 /* ---------------- Autonomous Message Handler ---------------- */
 const COOLDOWN = new Map();
@@ -110,7 +114,8 @@ client.on("messageCreate", async (message) => {
 
     // Fetch memory
     const mems = await fetchRecentMemories(message.author.id);
-    const fullPrompt = PERSONALITY_PROMPT + "\n" + mems.map(m => `Memory: ${m}`).join("\n") + "\nUser: " + message.content;
+    const memoryText = mems.map(m => `Memory: ${m}`).join("\n");
+    const fullPrompt = `${PERSONALITY_PROMPT}\n${memoryText}\nUser: ${message.content}`;
 
     const aiReply = await queryGemini(fullPrompt);
 
@@ -132,11 +137,7 @@ client.login(DISCORD_TOKEN);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.get("/", (req, res) => {
-  res.send("Luna Discord Bot is running!");
-});
+app.get("/", (req, res) => res.send("Luna Discord Bot is running!"));
 
-app.listen(PORT, () => {
-  console.log(`Web server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Web server running on port ${PORT}`));
 
