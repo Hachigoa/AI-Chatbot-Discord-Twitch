@@ -16,8 +16,8 @@ if (!DISCORD_TOKEN || !OPENAI_KEY) {
 
 /* ---------------- Personality ---------------- */
 const PERSONALITY_PROMPT = `
-You are "Luna", a playful, kind, slightly witty AI who loves strawberries and space.
-Stay in-character. Keep replies friendly and concise. Remember past conversations.
+You are "Luna", a playful, kind, witty AI who loves strawberries and space.
+Stay in-character, friendly, and concise. Remember past conversations.
 `;
 
 /* ---------------- SQLite Memory ---------------- */
@@ -32,7 +32,6 @@ let db;
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id TEXT,
       user_name TEXT,
-      type TEXT,
       content TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -53,14 +52,14 @@ const client = new Client({
 client.once('ready', () => console.log(`Discord bot ready as ${client.user.tag}`));
 
 /* ---------------- Memory Helpers ---------------- */
-async function storeMemory({ userId, userName, type='long', content }) {
+async function storeMemory(userId, userName, content) {
   await db.run(
-    `INSERT INTO memories (user_id, user_name, type, content) VALUES (?, ?, ?, ?)`,
-    [userId, userName, type, content]
+    `INSERT INTO memories (user_id, user_name, content) VALUES (?, ?, ?)`,
+    [userId, userName, content]
   );
 }
 
-async function fetchRelevantMemories(userId, limit=6) {
+async function fetchRecentMemories(userId, limit=5) {
   const rows = await db.all(
     `SELECT content FROM memories WHERE user_id = ? ORDER BY created_at DESC LIMIT ?`,
     [userId, limit]
@@ -69,14 +68,11 @@ async function fetchRelevantMemories(userId, limit=6) {
 }
 
 /* ---------------- OpenAI Query ---------------- */
-async function queryOpenAI(systemPrompt, conversationMessages) {
+async function queryOpenAI(systemPrompt, messages) {
   const body = {
     model: "gpt-4o-mini",
-    messages: [
-      { role: "system", content: systemPrompt },
-      ...conversationMessages
-    ],
-    max_tokens: 500,
+    messages,
+    max_tokens: 250,
     temperature: 0.8
   };
 
@@ -94,71 +90,34 @@ async function queryOpenAI(systemPrompt, conversationMessages) {
   return json.choices[0].message.content;
 }
 
-/* ---------------- Command Handler ---------------- */
-async function handleCommand({ userId, userName, command, args, rawMessage }) {
-  command = command?.toLowerCase?.();
-
-  if (command === "remember") {
-    const content = args.join(" ");
-    if (!content) return "Usage: !remember <something>";
-    await storeMemory({ userId, userName, content });
-    return `Got it — I’ll remember: "${content}"`;
-  }
-
-  if (command === "recall") {
-    const mems = await fetchRelevantMemories(userId, 6);
-    return mems.length ? `I remember:\n${mems.join("\n")}` : "I don't have anything remembered yet.";
-  }
-
-  if (command === "forget") {
-    await db.run(`DELETE FROM memories WHERE user_id = ?`, [userId]);
-    return "Cleared your memories.";
-  }
-
-  // Default AI response
-  const memoryStrings = await fetchRelevantMemories(userId, 6);
-  const messages = memoryStrings.map(m => ({ role: "system", content: `Memory: ${m}` }));
-  messages.push({ role: "user", content: rawMessage });
-
-  const aiReply = await queryOpenAI(PERSONALITY_PROMPT, messages);
-
-  await storeMemory({ userId, userName, type:'short', content: rawMessage });
-  await storeMemory({ userId, userName, type:'short', content: `Luna: ${aiReply}` });
-
-  return aiReply;
-}
-
-/* ---------------- Discord Listener ---------------- */
+/* ---------------- Message Handler ---------------- */
 client.on("messageCreate", async message => {
   try {
-    if (message.author.bot) return;
+    if (message.author.bot) return; // ignore other bots
 
+    // Optionally, only reply if mentioned or DM
     const isMention = message.mentions.has(client.user);
-    const isCommand = message.content.trim().startsWith("!");
     const isDM = message.channel.type === 1 || message.channel.type === "DM";
 
-    if (!isMention && !isCommand && !isDM) return;
+    if (!isMention && !isDM) return; // respond naturally only to mentions or DMs
 
-    let raw = message.content;
-    let cmd = null, args = [];
+    // Fetch recent memory
+    const memoryStrings = await fetchRecentMemories(message.author.id);
+    const messages = memoryStrings.map(m => ({ role:"system", content:`Memory: ${m}` }));
+    messages.push({ role:"user", content: message.content });
 
-    if (isCommand) {
-      const parts = raw.slice(1).split(/\s+/);
-      cmd = parts.shift();
-      args = parts;
-    } else if (isMention) {
-      raw = raw.replace(/<@!?[0-9]+>/g,"").trim();
-      const parts = raw.split(/\s+/);
-      cmd = parts.shift();
-      args = parts;
-    }
+    const aiReply = await queryOpenAI(PERSONALITY_PROMPT, messages);
 
-    const payload = { userId: message.author.id, userName: message.author.username, command: cmd, args, rawMessage: raw };
-    const reply = await handleCommand(payload);
+    // Store memory
+    await storeMemory(message.author.id, message.author.username, message.content);
+    await storeMemory(message.author.id, message.author.username, `Luna: ${aiReply}`);
 
-    await message.reply(reply);
+    await message.reply(aiReply);
 
-  } catch(err){ console.error(err); }
+  } catch(err) {
+    console.error(err);
+  }
 });
 
 client.login(DISCORD_TOKEN);
+
