@@ -7,10 +7,10 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.16.3",
+    "discord.js": "^14.14.1",
     "tmi.js": "^1.8.5",
-    "dotenv": "^16.4.5",
     "openai": "^4.0.0",
-    "sqlite3": "^5.1.7"
+    "dotenv": "^16.0.3",
+    "sqlite3": "^5.1.6"   // ✅ replaced sqlite with sqlite3
   }
 }
