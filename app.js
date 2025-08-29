@@ -86,15 +86,15 @@ const COOLDOWN = new Map();
 const RESPONSE_PROBABILITY = 0.25; // 25% chance to reply autonomously
 const USER_COOLDOWN = 15000; // 15s per user cooldown
 
-client.on("messageCreate", async message => {
+client.on("messageCreate", async (message) => {
   try {
     if (message.author.bot) return;
 
     const isMention = message.mentions.has(client.user);
 
     // Probability-based autonomous reply
-    const isAutonomous = !isMention && Math.random() > RESPONSE_PROBABILITY;
-    if (!isMention && isAutonomous) return;
+    const isAutonomous = !isMention && Math.random() < RESPONSE_PROBABILITY;
+    if (!isMention && !isAutonomous) return;
 
     // Cooldown per user
     const lastTime = COOLDOWN.get(message.author.id) || 0;
@@ -114,9 +114,12 @@ client.on("messageCreate", async message => {
 
     await message.reply(aiReply);
 
-  } catch(err){ console.error(err); }
+  } catch (err) {
+    console.error(err);
+  }
 });
 
+/* ---------------- Discord Login ---------------- */
 client.login(DISCORD_TOKEN);
 
 /* ---------------- Minimal Web Server ---------------- */
