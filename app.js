@@ -1,9 +1,9 @@
 import { Client, GatewayIntentBits, Partials } from "discord.js";
 import sqlite3 from "sqlite3";
-import { open } from "sqlite";
 import fetch from "node-fetch";
 import express from "express";
 import dotenv from "dotenv";
+import { promisify } from "util";
 
 dotenv.config();
 
@@ -22,64 +22,70 @@ Participate naturally in conversations, stay friendly, concise, and remember pas
 `;
 
 /* ---------------- SQLite Memory ---------------- */
-let db;
-(async () => {
-  db = await open({
-    filename: './memory.db',
-    driver: sqlite3.Database
-  });
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS memories (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id TEXT,
-      user_name TEXT,
-      content TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-})();
+const db = new sqlite3.Database('./memory.db', (err) => {
+  if (err) return console.error(err.message);
+  console.log("Connected to SQLite database");
+});
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    user_name TEXT,
+    content TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+const dbRun = promisify(db.run.bind(db));
+const dbAll = promisify(db.all.bind(db));
+
+async function storeMemory(userId, userName, content) {
+  await dbRun(`INSERT INTO memories (user_id,user_name,content) VALUES(?,?,?)`, [userId, userName, content]);
+}
+
+async function fetchRecentMemories(userId, limit = 5) {
+  const rows = await dbAll(
+    `SELECT content FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`,
+    [userId, limit]
+  );
+  return rows.map(r => r.content).reverse();
+}
+
+/* ---------------- Gemini Query ---------------- */
+async function queryGemini(prompt) {
+  const res = await fetch(
+    "https://api.generativeai.google/v1beta2/models/text-bison-001:generate",
+    {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${GEMINI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        prompt: prompt,
+        maxOutputTokens: 250,
+        temperature: 0.8
+      })
+    }
+  );
+
+  if (!res.ok) throw new Error(await res.text());
+  const json = await res.json();
+  return json.candidates[0].content;
+}
 
 /* ---------------- Discord Client ---------------- */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.MessageContent // Make sure this intent is enabled in Discord portal
   ],
   partials: [Partials.Channel]
 });
 
 client.once('ready', () => console.log(`Discord bot ready as ${client.user.tag}`));
-
-/* ---------------- Helpers ---------------- */
-async function storeMemory(userId, userName, content) {
-  await db.run(`INSERT INTO memories (user_id,user_name,content) VALUES(?,?,?)`, [userId,userName,content]);
-}
-
-async function fetchRecentMemories(userId, limit=5) {
-  const rows = await db.all(`SELECT content FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`, [userId,limit]);
-  return rows.map(r => r.content).reverse();
-}
-
-/* ---------------- Gemini Query ---------------- */
-async function queryGemini(prompt) {
-  const res = await fetch("https://api.generativeai.google/v1beta2/models/text-bison-001:generate", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${GEMINI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      prompt: prompt,
-      maxOutputTokens: 250,
-      temperature: 0.8
-    })
-  });
-
-  if (!res.ok) throw new Error(await res.text());
-  const json = await res.json();
-  return json.candidates[0].content;
-}
 
 /* ---------------- Autonomous Message Handler ---------------- */
 const COOLDOWN = new Map();
@@ -133,3 +139,4 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log(`Web server running on port ${PORT}`);
 });
+
