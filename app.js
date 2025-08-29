@@ -2,6 +2,7 @@ import { Client, GatewayIntentBits, Partials } from "discord.js";
 import sqlite3 from "sqlite3";
 import { open } from "sqlite";
 import fetch from "node-fetch";
+import express from "express";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -38,7 +39,7 @@ let db;
   `);
 })();
 
-/* ---------------- Discord ---------------- */
+/* ---------------- Discord Client ---------------- */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -81,13 +82,13 @@ async function queryGemini(prompt) {
 }
 
 /* ---------------- Autonomous Message Handler ---------------- */
-const COOLDOWN = new Map(); // per user cooldown (ms)
-const RESPONSE_PROBABILITY = 0.25; // 25% chance to reply when not mentioned
+const COOLDOWN = new Map();
+const RESPONSE_PROBABILITY = 0.25; // 25% chance to reply autonomously
 const USER_COOLDOWN = 15000; // 15s per user cooldown
 
 client.on("messageCreate", async message => {
   try {
-    if (message.author.bot) return; // ignore other bots
+    if (message.author.bot) return;
 
     const isMention = message.mentions.has(client.user);
 
@@ -118,8 +119,14 @@ client.on("messageCreate", async message => {
 
 client.login(DISCORD_TOKEN);
 
-  } catch(err){ console.error(err); }
+/* ---------------- Minimal Web Server ---------------- */
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get("/", (req, res) => {
+  res.send("Luna Discord Bot is running!");
 });
 
-client.login(DISCORD_TOKEN);
-
+app.listen(PORT, () => {
+  console.log(`Web server running on port ${PORT}`);
+});
