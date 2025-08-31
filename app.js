@@ -88,6 +88,7 @@ async function queryGemini(prompt) {
     const model = GEMINI_MODEL_ENV || 'models/gemini-2.5-chat';
     const url = `https://generativelanguage.googleapis.com/v1beta/${model}:chat`;
 
+    /* ---------------- Personality ---------------- */
     const body = {
       messages: [
         { role: 'system', content: 'You are Luna, a playful and witty AI.' },
