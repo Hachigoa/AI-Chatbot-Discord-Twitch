@@ -8,8 +8,10 @@ import express from 'express';
 import pkg from 'google-auth-library';
 const { GoogleAuth } = pkg;
 
+/* ---------------- env ---------------- */
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_CREDENTIALS_JSON = process.env.GEMINI_CREDENTIALS_JSON; // stringified service account JSON
+const GEMINI_MODEL_ENV = process.env.GEMINI_MODEL || ''; // optional: e.g. "models/gemini-2.5-pro"
 
 if (!DISCORD_TOKEN) {
   console.error('Missing DISCORD_TOKEN env var');
@@ -79,17 +81,19 @@ const credentials = (() => {
   }
 })();
 
+// Use the generative-language scope
 const googleAuth = new GoogleAuth({
   credentials,
-  scopes: ['https://www.googleapis.com/auth/generative-language'] // ✅ fixed scope
+  scopes: ['https://www.googleapis.com/auth/generative-language']
 });
 
 let cachedToken = null;
 let tokenExpiresAt = 0;
 
+// get a valid access token, with simple caching
 async function getAccessToken() {
   const now = Date.now();
-  if (cachedToken && now < tokenExpiresAt - 60 * 1000) {
+  if (cachedToken && now < tokenExpiresAt - 60 * 1000) { // refresh 60s before expiry
     return cachedToken;
   }
 
@@ -99,16 +103,104 @@ async function getAccessToken() {
 
   if (!token) throw new Error('Failed to obtain access token from Google auth client');
 
+  // conservative expiry
   cachedToken = token;
   tokenExpiresAt = Date.now() + 55 * 60 * 1000;
   return cachedToken;
 }
 
-/* ---------------- Gemini Query ---------------- */
+/* ---------------- Model discovery ---------------- */
+
+let cachedModelName = null; // full model resource name, e.g. "models/gemini-2.5-pro"
+
+async function listAvailableModels() {
+  try {
+    const token = await getAccessToken();
+    const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'x-goog-user-project': credentials.project_id || '' // associate request with project
+      }
+    });
+
+    if (!res.ok) {
+      const txt = await res.text();
+      console.error('List Models API error:', res.status, txt);
+      throw new Error(`List Models API error: ${res.status}`);
+    }
+
+    const data = await res.json();
+    // Expect data.models to be an array of model objects with .name
+    return Array.isArray(data?.models) ? data.models : [];
+  } catch (e) {
+    console.error('listAvailableModels error:', e);
+    return [];
+  }
+}
+
+function pickPreferredModel(models, envModel) {
+  // models: array of { name: "models/gemini-2.5-pro", ... }
+  if (!models || models.length === 0) return null;
+
+  // 1) If user provided an env var model, prefer it if present
+  if (envModel) {
+    const match = models.find(m => m.name === envModel || m.name.endsWith(`/${envModel}`) || m.name.includes(envModel));
+    if (match) return match.name;
+  }
+
+  // 2) Preferred candidate order (common stable models)
+  const preferredKeys = [
+    'gemini-2.5-pro',
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-2.5',
+    'gemini-2.0',
+    'gemini-pro'
+  ];
+
+  for (const key of preferredKeys) {
+    const found = models.find(m => m.name.includes(key));
+    if (found) return found.name;
+  }
+
+  // 3) fallback to first model that looks like a 'gemini' model
+  const geminiModel = models.find(m => m.name.toLowerCase().includes('gemini'));
+  if (geminiModel) return geminiModel.name;
+
+  // 4) final fallback: first model in list
+  return models[0].name;
+}
+
+async function ensureModel() {
+  if (cachedModelName) return cachedModelName;
+
+  const models = await listAvailableModels();
+  if (!models.length) {
+    console.warn('No models returned from List Models; will attempt to use env GEMINI_MODEL or default model path.');
+    if (GEMINI_MODEL_ENV) {
+      cachedModelName = GEMINI_MODEL_ENV.startsWith('models/') ? GEMINI_MODEL_ENV : `models/${GEMINI_MODEL_ENV}`;
+      return cachedModelName;
+    }
+    // fallback - this may produce a 404 if invalid
+    cachedModelName = 'models/gemini-2.5-pro';
+    return cachedModelName;
+  }
+
+  const chosen = pickPreferredModel(models, GEMINI_MODEL_ENV);
+  cachedModelName = chosen;
+  console.log('Selected Gemini model:', cachedModelName);
+  return cachedModelName;
+}
+
+/* ---------------- Gemini Query (generateContent) ---------------- */
 async function queryGemini(prompt) {
   try {
     const token = await getAccessToken();
-    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent';
+    const modelName = await ensureModel(); // e.g. "models/gemini-2.5-pro"
+    const projectId = credentials.project_id || '';
+    const url = `https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent`;
 
     const body = {
       contents: [
@@ -121,8 +213,9 @@ async function queryGemini(prompt) {
     const res = await fetch(url, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${token}`, // ✅ works with correct scope now
-        'Content-Type': 'application/json'
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'x-goog-user-project': projectId
       },
       body: JSON.stringify(body)
     });
@@ -130,14 +223,67 @@ async function queryGemini(prompt) {
     if (!res.ok) {
       const txt = await res.text();
       console.error('Gemini API error:', res.status, txt);
+      // If we get 404 for the chosen model, try refreshing model list once and retry
+      if (res.status === 404) {
+        console.warn('Model not found. Refreshing models and retrying once...');
+        cachedModelName = null;
+        const newModel = await ensureModel();
+        if (newModel !== modelName) {
+          // retry with new model
+          const retryUrl = `https://generativelanguage.googleapis.com/v1beta/${newModel}:generateContent`;
+          const retry = await fetch(retryUrl, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+              'x-goog-user-project': projectId
+            },
+            body: JSON.stringify(body)
+          });
+          if (!retry.ok) {
+            const rtxt = await retry.text();
+            console.error('Retry Gemini API error:', retry.status, rtxt);
+            throw new Error(`Gemini API error after retry: ${retry.status}`);
+          }
+          const retryData = await retry.json();
+          return parseGeminiResponse(retryData);
+        }
+      }
       throw new Error(`Gemini API error: ${res.status}`);
     }
 
     const data = await res.json();
-    return data?.candidates?.[0]?.content?.parts?.[0]?.text || "No response from Gemini";
+    return parseGeminiResponse(data);
   } catch (e) {
     console.error('queryGemini error:', e);
     return 'Sorry, I cannot reach the AI right now.';
+  }
+}
+
+function parseGeminiResponse(data) {
+  // Try the common response shapes defensively
+  try {
+    // new format: data.candidates[0].content.parts[0].text
+    const cand = data?.candidates?.[0] || data?.response?.candidates?.[0];
+    if (cand) {
+      const content = cand?.content || cand?.output || cand;
+      if (typeof content === 'string') return content;
+      if (Array.isArray(content)) {
+        if (typeof content[0] === 'string') return content.join('\n');
+        if (content[0]?.text) return content.map(c => c.text).join('\n');
+      }
+      if (content?.parts?.[0]?.text) return content.parts.map(p => p.text).join('\n');
+    }
+
+    // legacy / alternate: data.generatedText or data.output_text
+    if (data?.generatedText) return data.generatedText;
+    if (data?.output_text) return data.output_text;
+
+    // last resort: stringify
+    return JSON.stringify(data).slice(0, 2000); // shorten long JSON
+  } catch (e) {
+    console.error('parseGeminiResponse error:', e);
+    return 'Sorry, I could not parse the AI response.';
   }
 }
 
