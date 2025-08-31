@@ -1,5 +1,11 @@
-// app.js - Fixed Luna Discord Bot (Neuro-sama style basics + memory + Gemini + GitHub AI)
-// ESM module version — works with "type": "module" in package.json
+// app.js
+// - Gemini primary (Google service account auth)
+// - GitHub AI fallback (via OpenAI SDK to GitHub models)
+// - SQLite memory (per-user memories, mood & personality fields)
+// - Keep-alive HTTP endpoint (for uptime monitors)
+// - Mention detection, dedupe guard, cooldowns
+// Set env vars:
+// DISCORD_TOKEN, GEMINI_CREDENTIALS_JSON (stringified service account JSON), optionally GITHUB_TOKEN, PORT
 
 import 'dotenv/config';
 import { Client, GatewayIntentBits, Partials } from 'discord.js';
@@ -15,22 +21,32 @@ const { GoogleAuth } = pkg;
 /* ---------------- Environment ---------------- */
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_CREDENTIALS_JSON = process.env.GEMINI_CREDENTIALS_JSON;
-const GEMINI_MODEL_ENV = process.env.GEMINI_MODEL || 'models/gemini-2.5-chat';
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || ''; // optional
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'models/gemini-2.5-chat';
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
+const PORT = Number(process.env.PORT || 10000);
+const USER_COOLDOWN_MS = Number(process.env.USER_COOLDOWN_MS || 7000); // default 7s
+const DEDUPE_TTL_MS = Number(process.env.DEDUPE_TTL_MS || 60_000); // 60s
 
-if (!DISCORD_TOKEN || !GEMINI_CREDENTIALS_JSON) {
-  console.error('Missing required environment variables: DISCORD_TOKEN and GEMINI_CREDENTIALS_JSON are required.');
+if (!DISCORD_TOKEN) {
+  console.error('Missing DISCORD_TOKEN environment variable.');
+  process.exit(1);
+}
+if (!GEMINI_CREDENTIALS_JSON) {
+  console.error('Missing GEMINI_CREDENTIALS_JSON environment variable.');
   process.exit(1);
 }
 
-/* ---------------- Keep-alive / Uptime route ---------------- */
+/* ---------------- Keep-alive server ---------------- */
 const keepAliveApp = express();
-const PORT = Number(process.env.PORT || 10000);
 keepAliveApp.get('/', (req, res) => {
-  res.send('Luna Discord Bot is running');
+  console.log(`[KeepAlive] ping ${new Date().toISOString()} from ${req.ip || req.headers['x-forwarded-for'] || 'unknown'}`);
+  res.status(200).send('Luna Discord Bot is running');
+});
+keepAliveApp.get('/health', (req, res) => {
+  res.status(200).json({ ok: true, pid: process.pid, time: new Date().toISOString() });
 });
 keepAliveApp.listen(PORT, () => {
-  console.log(`[KeepAlive] Server running on port ${PORT}`);
+  console.log(`[KeepAlive] Server listening on port ${PORT}`);
 });
 
 /* ---------------- SQLite memory ---------------- */
@@ -69,7 +85,9 @@ async function fetchRecentMemories(userId, limit = 6) {
       `SELECT content, response, mood, personality FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`,
       [userId, limit]
     );
-    return rows.reverse().map(r => `User (mood:${r.mood}, personality:${r.personality}): ${r.content}\nLuna: ${r.response}`).join('\n');
+    return rows.reverse().map(r =>
+      `User (mood:${r.mood}, personality:${r.personality}): ${r.content}\nLuna: ${r.response}`
+    ).join('\n');
   } catch (e) {
     console.error('fetchRecentMemories error:', e);
     return '';
@@ -77,7 +95,14 @@ async function fetchRecentMemories(userId, limit = 6) {
 }
 
 /* ---------------- Google Auth (Gemini) ---------------- */
-const credentials = JSON.parse(GEMINI_CREDENTIALS_JSON);
+let credentials;
+try {
+  credentials = JSON.parse(GEMINI_CREDENTIALS_JSON);
+} catch (e) {
+  console.error('Failed to parse GEMINI_CREDENTIALS_JSON:', e);
+  process.exit(1);
+}
+
 const googleAuth = new GoogleAuth({
   credentials,
   scopes: ['https://www.googleapis.com/auth/generative-language']
@@ -85,27 +110,27 @@ const googleAuth = new GoogleAuth({
 
 let cachedToken = null;
 let tokenExpiresAt = 0;
+
 async function getAccessToken() {
   const now = Date.now();
   if (cachedToken && now < tokenExpiresAt - 60_000) return cachedToken;
   const client = await googleAuth.getClient();
   const tokenResponse = await client.getAccessToken();
   const token = typeof tokenResponse === 'string' ? tokenResponse : tokenResponse?.token;
-  if (!token) throw new Error('Failed to get token from GoogleAuth client');
+  if (!token) throw new Error('Failed to obtain access token from Google client');
   cachedToken = token;
-  tokenExpiresAt = Date.now() + 55 * 60 * 1000; // conservative expiry
+  tokenExpiresAt = Date.now() + 55 * 60 * 1000; // 55 minutes
   return cachedToken;
 }
 
-/* ---------------- Gemini query helper ---------------- */
+/* ---------------- Gemini API call ---------------- */
 async function queryGemini(prompt, opts = {}) {
   try {
     const token = await getAccessToken();
-    const model = GEMINI_MODEL_ENV;
-    const url = `https://generativelanguage.googleapis.com/v1beta/${model}:generateMessage`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/${GEMINI_MODEL}:generateMessage`;
 
     const body = {
-      messages: [{ author: "user", content: [{ type: "text", text: prompt }] }],
+      messages: [{ author: 'user', content: [{ type: 'text', text: prompt }] }],
       temperature: opts.temperature ?? 0.8,
       maxOutputTokens: opts.maxOutputTokens ?? 400
     };
@@ -114,7 +139,8 @@ async function queryGemini(prompt, opts = {}) {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'x-goog-user-project': credentials?.project_id || ''
       },
       body: JSON.stringify(body)
     });
@@ -122,53 +148,53 @@ async function queryGemini(prompt, opts = {}) {
     if (!res.ok) {
       const txt = await res.text();
       console.error('Gemini API error:', res.status, txt);
-      throw new Error(`Gemini failed: ${txt}`);
+      throw new Error(`Gemini API error: ${res.status}`);
     }
 
     const data = await res.json();
-    // Try common response locations
-    const candidate = data?.candidates?.[0]?.content?.[0]?.text || data?.output?.[0]?.content?.[0]?.text;
+    // Extract sensible text paths
+    const candidate = data?.candidates?.[0]?.content?.[0]?.text
+      || data?.candidates?.[0]?.content?.map(c => c.text).join('\n')
+      || data?.output?.[0]?.content?.[0]?.text
+      || data?.generatedText
+      || null;
+
     if (candidate) return candidate;
-    // fallback: stringify small
     return JSON.stringify(data).slice(0, 2000);
   } catch (e) {
-    console.warn('Gemini failed, will attempt GitHub AI fallback:', e.message);
+    console.warn('Gemini failed:', e?.message || e);
+    // fallback to GitHub AI
     return queryGitHubAI(prompt);
   }
 }
 
 /* ---------------- GitHub AI fallback (OpenAI client to GitHub models) ---------------- */
-const githubClient = new OpenAI({ baseURL: 'https://models.github.ai/inference', apiKey: GITHUB_TOKEN });
+const githubClient = new OpenAI({ apiKey: GITHUB_TOKEN, baseURL: 'https://models.github.ai/inference' });
 
 async function queryGitHubAI(prompt) {
   if (!GITHUB_TOKEN) {
-    console.warn('No GITHUB_TOKEN provided — skipping GitHub AI fallback.');
+    console.warn('No GITHUB_TOKEN set; GitHub AI fallback unavailable.');
     return "Sorry, I can't think right now (no fallback available).";
   }
   try {
-    const response = await githubClient.chat.completions.create({
+    const resp = await githubClient.chat.completions.create({
       model: 'openai/gpt-4o',
       messages: [
-        { role: 'system', content: 'You are Luna, a friendly, witty AI who remembers user personality and mood.' },
+        { role: 'system', content: 'You are Luna — a playful, witty AI who remembers user personality and mood.' },
         { role: 'user', content: prompt }
       ],
       temperature: 0.8,
       max_tokens: 400
     });
-    return response.choices?.[0]?.message?.content ?? "I couldn't generate a reply.";
+    return resp.choices?.[0]?.message?.content ?? "I couldn't generate a reply.";
   } catch (err) {
     console.error('GitHub AI error:', err);
     return 'Sorry, I cannot generate a reply right now (fallback failed).';
   }
 }
 
-/* ---------------- Discord client (fixed intents) ---------------- */
-/*
-  Important: remove invalid intents. Valid ones used below:
-  - Guilds
-  - GuildMessages
-  - MessageContent (for reading message text)
-*/
+/* ---------------- Discord client ---------------- */
+/* Use only valid intents for discord.js v14+ */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -178,72 +204,91 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-client.once('ready', () => console.log(`Discord bot ready as ${client.user.tag}`));
+client.once('ready', () => {
+  console.log(`Discord bot ready as ${client.user.tag} (pid ${process.pid})`);
+});
 
-/* ---------------- Mention detection helpers ---------------- */
+/* ---------------- Mention detection helper ---------------- */
 function messageMentionsBot(message) {
-  // direct mention like <@id>
-  if (message.mentions && message.mentions.users && message.mentions.users.has(client.user.id)) return true;
+  if (!message || !message.content) return false;
 
-  // call by name (case-insensitive)
-  const content = (message.content || '').toLowerCase();
-  if (content.includes('luna')) return true; // matches the name anywhere
+  // direct mention (<@id> or <@!id>)
+  if (message.mentions?.users?.has && message.mentions.users.has(client.user.id)) return true;
 
-  // check for nickname mention spelled exactly as displayName
+  // nickname mention spelled exactly (case-insensitive)
   const nick = message.member?.nickname?.toLowerCase();
-  if (nick && content.includes(nick)) return true;
+  if (nick && message.content.toLowerCase().includes(nick)) return true;
+
+  // name calling "luna" anywhere (case-insensitive) — adjust if too noisy
+  if (message.content.toLowerCase().includes('luna')) return true;
 
   return false;
 }
 
-/* ---------------- Cooldown ---------------- */
+/* ---------------- Dedupe + cooldown ---------------- */
+const handledMessages = new Set();
+function markHandled(messageId) {
+  handledMessages.add(messageId);
+  setTimeout(() => handledMessages.delete(messageId), DEDUPE_TTL_MS);
+}
+
 const COOLDOWN = new Map();
-const USER_COOLDOWN_MS = Number(process.env.USER_COOLDOWN_MS || 7000); // default 7s
 
 /* ---------------- Message handler ---------------- */
 client.on('messageCreate', async (message) => {
   try {
-    if (message.author?.bot) return; // ignore bots
+    if (!message || !message.content) return;
+    if (message.author?.bot) return;
 
-    // Do we need to respond?
+    // dedupe within this process
+    if (handledMessages.has(message.id)) {
+      // already handled recently in this process
+      return;
+    }
+
+    // check whether to respond
     if (!messageMentionsBot(message)) return;
 
-    // Cooldown per user
+    // user cooldown
     const last = COOLDOWN.get(message.author.id) || 0;
-    if (Date.now() - last < USER_COOLDOWN_MS) return;
+    if (Date.now() - last < USER_COOLDOWN_MS) {
+      return;
+    }
     COOLDOWN.set(message.author.id, Date.now());
 
-    // Build prompt/context
+    // mark handled immediately (prevents duplicate replies in same process)
+    markHandled(message.id);
+
     const displayName = message.member?.nickname ?? message.author.username;
     const recent = await fetchRecentMemories(message.author.id, 6);
 
-    // Compose system + context; keep concise to avoid token issues
-    const prompt = `You are Luna — a playful, witty AI who likes strawberries and space.
-User: ${displayName}
-Recent memory:
-${recent || '(no recent memory)'}
-New message: ${message.content}
+    const shortRecent = recent ? `Recent memory:\n${recent}\n\n` : '';
 
-Reply warmly and helpfully, reflect on previous memory if relevant, and keep responses short (1-6 sentences).`;
+    const prompt = `You are Luna, a playful, witty AI who loves strawberries and space.
+${shortRecent}User: ${displayName}
+Message: ${message.content}
 
-    // Query Gemini (primary)
+Respond concisely (1-6 sentences), friendly and helpful. If appropriate, recall prior memory from the Recent memory section.`;
+
+    // Query Gemini (primary), fallback handled inside function
     const reply = await queryGemini(prompt);
 
-    // Basic mood & personality heuristics (small and fast)
+    // quick mood & personality heuristics (simple, can be improved)
     let mood = 'neutral';
     let personality = 'neutral';
-    const lcReply = reply.toLowerCase();
-    if (lcReply.includes('happy') || lcReply.includes('joy') || lcReply.includes('glad')) mood = 'happy';
-    if (lcReply.includes('sad') || lcReply.includes('sorry') || lcReply.includes('unfortunately')) mood = 'sad';
-    if (lcReply.includes('angry') || lcReply.includes('frustrat')) mood = 'angry';
-    if (lcReply.includes('playful') || lcReply.includes('joke') || lcReply.includes('hehe')) personality = 'playful';
-    if (lcReply.includes('serious') || lcReply.includes('formal')) personality = 'serious';
+    const lc = (reply || '').toLowerCase();
+    if (lc.match(/\b(happy|glad|joy|yay|excited)\b/)) mood = 'happy';
+    if (lc.match(/\b(sad|sorry|unfortunate|sorrow)\b/)) mood = 'sad';
+    if (lc.match(/\b(angry|annoyed|frustrat)\b/)) mood = 'angry';
+    if (lc.match(/\b(joke|joking|playful|hehe|lol)\b/)) personality = 'playful';
+    if (lc.match(/\b(serious|formal|professional)\b/)) personality = 'serious';
 
-    // Store memory
     await storeMemory(message.author.id, displayName, message.content, reply, mood, personality);
 
-    // Reply
-    await message.reply(reply);
+    console.log(`[REPLY] pid ${process.pid} -> ${message.author.tag} msg:${message.id}`);
+    await message.reply(reply).catch(err => {
+      console.error('Failed to send reply:', err);
+    });
   } catch (err) {
     console.error('messageCreate handler error:', err);
   }
