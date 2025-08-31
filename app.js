@@ -41,10 +41,10 @@ let db;
 })();
 
 async function storeMemory(userId, userName, content) {
-  try { 
-    await db.run(`INSERT INTO memories (user_id,user_name,content) VALUES(?,?,?)`, [userId, userName, content]); 
-  } catch(e) { 
-    console.error('storeMemory error:', e); 
+  try {
+    await db.run(`INSERT INTO memories (user_id,user_name,content) VALUES(?,?,?)`, [userId, userName, content]);
+  } catch(e) {
+    console.error('storeMemory error:', e);
   }
 }
 
@@ -52,9 +52,9 @@ async function fetchRecentMemories(userId, limit = 5) {
   try {
     const rows = await db.all(`SELECT content FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`, [userId, limit]);
     return rows.map(r => r.content).reverse();
-  } catch(e) { 
-    console.error('fetchRecentMemories error:', e); 
-    return []; 
+  } catch(e) {
+    console.error('fetchRecentMemories error:', e);
+    return [];
   }
 }
 
@@ -64,6 +64,7 @@ const googleAuth = new GoogleAuth({ credentials, scopes: ['https://www.googleapi
 
 let cachedToken = null;
 let tokenExpiresAt = 0;
+
 async function getAccessToken() {
   const now = Date.now();
   if (cachedToken && now < tokenExpiresAt - 60000) return cachedToken;
@@ -80,19 +81,24 @@ async function getAccessToken() {
 async function queryGemini(prompt) {
   try {
     const token = await getAccessToken();
-    const model = GEMINI_MODEL_ENV || 'models/gemini-2.5-flash';
-    const url = `https://generativelanguage.googleapis.com/v1beta/${model}:generateContent`;
-    const body = { 
-      prompt: { text: prompt }, 
-      temperature: 0.8, 
-      maxOutputTokens: 300, 
-      candidateCount: 1 
+    const model = GEMINI_MODEL_ENV || 'models/gemini-2.5-chat';
+    const url = `https://generativelanguage.googleapis.com/v1beta/${model}:generateMessage`;
+
+    const body = {
+      messages: [
+        { author: "user", content: [{ type: "text", text: prompt }] }
+      ],
+      temperature: 0.8,
+      maxOutputTokens: 300
     };
 
-    const res = await fetch(url, { 
-      method: 'POST', 
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, 
-      body: JSON.stringify(body) 
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
     });
 
     if (!res.ok) {
@@ -102,16 +108,12 @@ async function queryGemini(prompt) {
     }
 
     const data = await res.json();
-    const candidate = data?.candidates?.[0] || data?.response?.candidates?.[0];
+    const candidate = data?.candidates?.[0]?.content?.[0]?.text || data?.output?.[0]?.content?.[0]?.text;
     if (!candidate) return 'Sorry, I could not generate a reply.';
-    if (typeof candidate === 'string') return candidate;
-    if (candidate?.content) return candidate.content;
-    if (Array.isArray(candidate?.content)) return candidate.content.map(c => c.text || c).join('\n');
-    return JSON.stringify(candidate).slice(0, 2000);
+    return candidate;
 
   } catch(e) {
     console.warn('Gemini failed, switching to Puter.js:', e.message);
-    // Puter.js fallback
     return `Puter.js fallback response: ${prompt}`;
   }
 }
@@ -126,29 +128,29 @@ const client = new Client({
   partials: [Partials.Channel] 
 });
 
-client.once('ready', () => console.log(`Discord bot ready as ${client.user.tag}`));
+client.once('clientReady', () => console.log(`Discord bot ready as ${client.user.tag}`));
 
 const COOLDOWN = new Map();
-const RESPONSE_PROBABILITY = 0.25; // Random replies for fun
+const RESPONSE_PROBABILITY = 0.25;
 const USER_COOLDOWN_MS = 15000;
 
 client.on('messageCreate', async message => {
   try {
     if (message.author.bot) return;
 
-    // Check cooldown
+    // Only respond when bot is mentioned
+    if (!message.mentions.has(client.user)) return;
+
     const last = COOLDOWN.get(message.author.id) || 0;
     if (Date.now() - last < USER_COOLDOWN_MS) return;
     COOLDOWN.set(message.author.id, Date.now());
+
+    if (Math.random() > RESPONSE_PROBABILITY) return;
 
     const displayName = message.member?.nickname || message.author.username;
     const mems = await fetchRecentMemories(message.author.id);
     const memoryText = mems.map(m => `Memory: ${m}`).join('\n');
     const fullPrompt = `You are "Luna", a playful, witty AI who loves strawberries and space.\nUser (${displayName}): ${message.content}\n${memoryText}`;
-
-    // Respond if bot is mentioned OR random probability triggers
-    const botMentioned = message.mentions.has(client.user);
-    if (!botMentioned && Math.random() > RESPONSE_PROBABILITY) return;
 
     const reply = await queryGemini(fullPrompt);
     await storeMemory(message.author.id, displayName, message.content);
@@ -160,7 +162,7 @@ client.on('messageCreate', async message => {
   }
 });
 
-client.login(DISCORD_TOKEN).catch(err => { 
-  console.error('Discord login failed:', err); 
-  process.exit(1); 
+client.login(DISCORD_TOKEN).catch(err => {
+  console.error('Discord login failed:', err);
+  process.exit(1);
 });
