@@ -1,4 +1,4 @@
-// app.js - Luna Discord Bot with Gemini + GitHub AI + Memory
+// app.js - Luna Discord Bot with Long-Term Memory
 import 'dotenv/config';
 import { Client, GatewayIntentBits, Partials } from 'discord.js';
 import sqlite3 from 'sqlite3';
@@ -6,6 +6,7 @@ import { open } from 'sqlite';
 import fetch from 'node-fetch';
 import pkg from 'google-auth-library';
 import OpenAI from 'openai';
+import express from 'express';
 
 const { GoogleAuth } = pkg;
 
@@ -20,42 +21,78 @@ if (!DISCORD_TOKEN || !GEMINI_CREDENTIALS_JSON) {
   process.exit(1);
 }
 
-// --- Express for status ---
-import express from 'express';
+// --- Express for Status ---
 const app = express();
 const PORT = process.env.PORT || 10000;
 app.get('/', (req, res) => res.send('Luna Discord Bot is running'));
 app.listen(PORT, () => console.log(`Web server running on port ${PORT}`));
 
-// --- SQLite Memory Setup ---
+// --- SQLite Setup ---
 let db;
 (async () => {
   db = await open({ filename: './memory.db', driver: sqlite3.Database });
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      username TEXT,
+      mood TEXT,
+      notes TEXT,
+      last_seen DATETIME
+    );
+  `);
+
   await db.exec(`
     CREATE TABLE IF NOT EXISTS memories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id TEXT,
-      user_name TEXT,
       content TEXT,
       response TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(user_id) REFERENCES users(id)
     );
   `);
+
   console.log('Connected to SQLite database');
 })();
 
-async function storeMemory(userId, userName, content, response) {
+// --- Store and Fetch Users ---
+async function updateUser(userId, username, mood = null, notes = null) {
   try {
     await db.run(
-      `INSERT INTO memories (user_id, user_name, content, response) VALUES (?, ?, ?, ?)`,
-      [userId, userName, content, response]
+      `INSERT INTO users (id, username, mood, notes, last_seen)
+       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(id) DO UPDATE SET
+       username=excluded.username, mood=COALESCE(excluded.mood, mood), notes=COALESCE(excluded.notes, notes), last_seen=CURRENT_TIMESTAMP`,
+      [userId, username, mood, notes]
+    );
+  } catch (e) {
+    console.error('updateUser error:', e);
+  }
+}
+
+async function fetchUser(userId) {
+  try {
+    return await db.get(`SELECT * FROM users WHERE id=?`, [userId]);
+  } catch (e) {
+    console.error('fetchUser error:', e);
+    return null;
+  }
+}
+
+// --- Store & Fetch Memories ---
+async function storeMemory(userId, content, response) {
+  try {
+    await db.run(
+      `INSERT INTO memories (user_id, content, response) VALUES (?, ?, ?)`,
+      [userId, content, response]
     );
   } catch (e) {
     console.error('storeMemory error:', e);
   }
 }
 
-async function fetchRecentMemories(userId, limit = 5) {
+async function fetchRecentMemories(userId, limit = 10) {
   try {
     const rows = await db.all(
       `SELECT content, response FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`,
@@ -119,7 +156,6 @@ async function queryGemini(prompt) {
 
 // --- GitHub AI fallback ---
 const githubClient = new OpenAI({ baseURL: "https://models.github.ai/inference", apiKey: GITHUB_TOKEN });
-
 async function queryGitHubAI(prompt) {
   if (!GITHUB_TOKEN) return 'No GitHub AI token provided.';
   try {
@@ -155,16 +191,17 @@ client.on('messageCreate', async message => {
     if (message.author.bot) return;
     if (!message.mentions.has(client.user)) return;
 
-    const last = COOLDOWN.get(message.author.id) || 0;
-    if (Date.now() - last < USER_COOLDOWN_MS) return;
-    COOLDOWN.set(message.author.id, Date.now());
-
     const displayName = message.member?.nickname || message.author.username;
+
+    // Update user in DB
+    await updateUser(message.author.id, displayName);
+
+    // Fetch recent memories
     const recentMemories = await fetchRecentMemories(message.author.id);
     const fullPrompt = `User (${displayName}): ${message.content}\n${recentMemories}`;
 
     const reply = await queryGemini(fullPrompt);
-    await storeMemory(message.author.id, displayName, message.content, reply);
+    await storeMemory(message.author.id, message.content, reply);
 
     await message.reply(reply);
   } catch (e) {
