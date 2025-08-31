@@ -1,4 +1,4 @@
-// app.js - Luna Discord Bot with Gemini + GitHub AI + Memory + Keep-Alive
+// app.js - Luna Discord Bot with Gemini + GitHub AI + Memory
 import 'dotenv/config';
 import { Client, GatewayIntentBits, Partials } from 'discord.js';
 import sqlite3 from 'sqlite3';
@@ -10,15 +10,6 @@ import express from 'express';
 
 const { GoogleAuth } = pkg;
 
-// --- Keep-Alive Server (for uptime monitors) ---
-const keepAliveApp = express();
-const PORT = process.env.PORT || 8080;
-keepAliveApp.get('/', (req, res) => {
-  console.log(`[KeepAlive] Ping received at ${new Date().toLocaleString()}`);
-  res.send("Bot is alive");
-});
-keepAliveApp.listen(PORT, () => console.log(`[KeepAlive] Server running on port ${PORT}`));
-
 // --- Environment Variables ---
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_CREDENTIALS_JSON = process.env.GEMINI_CREDENTIALS_JSON;
@@ -29,6 +20,12 @@ if (!DISCORD_TOKEN || !GEMINI_CREDENTIALS_JSON) {
   console.error('Missing required environment variables.');
   process.exit(1);
 }
+
+// --- Express for uptime ---
+const app = express();
+const PORT = process.env.PORT || 10000;
+app.get('/', (req, res) => res.send("Luna Discord Bot is running"));
+app.listen(PORT, () => console.log(`Web server running on port ${PORT}`));
 
 // --- SQLite Memory Setup ---
 let db;
@@ -144,7 +141,12 @@ async function queryGitHubAI(prompt) {
 
 // --- Discord Bot ---
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMessageMentions
+  ],
   partials: [Partials.Channel]
 });
 
@@ -156,7 +158,11 @@ const USER_COOLDOWN_MS = 15000;
 client.on('messageCreate', async message => {
   try {
     if (message.author.bot) return;
-    if (!message.mentions.has(client.user)) return;
+
+    // Detect mention or name-calling
+    const mentioned = message.mentions.users.has(client.user.id);
+    const calledByName = message.content.toLowerCase().includes('luna');
+    if (!mentioned && !calledByName) return;
 
     const last = COOLDOWN.get(message.author.id) || 0;
     if (Date.now() - last < USER_COOLDOWN_MS) return;
