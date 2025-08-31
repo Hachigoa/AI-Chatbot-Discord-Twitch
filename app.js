@@ -8,6 +8,7 @@ import pkg from 'google-auth-library';
 import OpenAI from 'openai';
 
 const { GoogleAuth } = pkg;
+const keep_alive = require('./keep_alive.js')
 
 // --- Environment Variables ---
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
