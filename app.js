@@ -12,7 +12,7 @@ const { GoogleAuth } = pkg;
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_CREDENTIALS_JSON = process.env.GEMINI_CREDENTIALS_JSON;
 const GEMINI_MODEL_ENV = process.env.GEMINI_MODEL || '';
-const GITHUB_AI_TOKEN = process.env.GITHUB_AI_TOKEN; // personal access token
+const GITHUB_AI_TOKEN = process.env.GITHUB_TOKEN; // personal access token
 
 if (!DISCORD_TOKEN || !GEMINI_CREDENTIALS_JSON || !GITHUB_AI_TOKEN) {
   console.error('Missing environment variables');
