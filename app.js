@@ -1,22 +1,27 @@
+// app.js
 import 'dotenv/config';
 import { Client, GatewayIntentBits, Partials } from 'discord.js';
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import fetch from 'node-fetch';
 import express from 'express';
-import OpenAI from 'openai';
 import pkg from 'google-auth-library';
+import OpenAI from 'openai';
 const { GoogleAuth } = pkg;
 
-/* ---------------- Env ---------------- */
+/* ---------------- env ---------------- */
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_CREDENTIALS_JSON = process.env.GEMINI_CREDENTIALS_JSON;
 const GEMINI_MODEL_ENV = process.env.GEMINI_MODEL || '';
-const GITHUB_KEY = process.env.GITHUB_KEY; // Use your existing variable
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
-if (!DISCORD_TOKEN || !GEMINI_CREDENTIALS_JSON || !GITHUB_KEY) {
+if (!DISCORD_TOKEN || !GEMINI_CREDENTIALS_JSON) {
   console.error('Missing environment variables');
   process.exit(1);
+}
+
+if (!GITHUB_TOKEN) {
+  console.warn('GITHUB_TOKEN not set. GitHub AI fallback will not work.');
 }
 
 /* ---------------- Express ---------------- */
@@ -25,7 +30,7 @@ const PORT = process.env.PORT || 10000;
 app.get('/', (req, res) => res.send('Luna Discord Bot is running'));
 app.listen(PORT, () => console.log(`Web server running on port ${PORT}`));
 
-/* ---------------- SQLite ---------------- */
+/* ---------------- SQLite memory ---------------- */
 let db;
 (async () => {
   db = await open({ filename: './memory.db', driver: sqlite3.Database });
@@ -43,7 +48,10 @@ let db;
 
 async function storeMemory(userId, userName, content) {
   try {
-    await db.run(`INSERT INTO memories (user_id,user_name,content) VALUES(?,?,?)`, [userId, userName, content]);
+    await db.run(
+      `INSERT INTO memories (user_id, user_name, content) VALUES (?, ?, ?)`,
+      [userId, userName, content]
+    );
   } catch (e) {
     console.error('storeMemory error:', e);
   }
@@ -51,7 +59,10 @@ async function storeMemory(userId, userName, content) {
 
 async function fetchRecentMemories(userId, limit = 5) {
   try {
-    const rows = await db.all(`SELECT content FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`, [userId, limit]);
+    const rows = await db.all(
+      `SELECT content FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`,
+      [userId, limit]
+    );
     return rows.map(r => r.content).reverse();
   } catch (e) {
     console.error('fetchRecentMemories error:', e);
@@ -61,7 +72,10 @@ async function fetchRecentMemories(userId, limit = 5) {
 
 /* ---------------- Google Auth (Gemini) ---------------- */
 const credentials = JSON.parse(GEMINI_CREDENTIALS_JSON);
-const googleAuth = new GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/generative-language'] });
+const googleAuth = new GoogleAuth({
+  credentials,
+  scopes: ['https://www.googleapis.com/auth/generative-language']
+});
 
 let cachedToken = null;
 let tokenExpiresAt = 0;
@@ -81,19 +95,26 @@ async function getAccessToken() {
 async function queryGemini(prompt) {
   try {
     const token = await getAccessToken();
-    const model = GEMINI_MODEL_ENV || 'models/gemini-2.5-flash';
-    const url = `https://generativelanguage.googleapis.com/v1beta/${model}:generateText`;
-    const body = { 
-      text: prompt, 
-      temperature: 0.8, 
-      maxOutputTokens: 300 
+    const model = GEMINI_MODEL_ENV || 'models/gemini-2.5-chat';
+    const url = `https://generativelanguage.googleapis.com/v1beta/${model}:generateMessage`;
+
+    const body = {
+      messages: [
+        { author: "user", content: [{ type: "text", text: prompt }] }
+      ],
+      temperature: 0.8,
+      maxOutputTokens: 300
     };
 
-    const res = await fetch(url, { 
-      method: 'POST', 
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, 
-      body: JSON.stringify(body) 
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
     });
+
     if (!res.ok) {
       const txt = await res.text();
       console.error('Gemini API error:', res.status, txt);
@@ -101,43 +122,57 @@ async function queryGemini(prompt) {
     }
 
     const data = await res.json();
-    return data?.candidates?.[0]?.content || 'Gemini did not return content';
+    const candidate = data?.candidates?.[0]?.content?.[0]?.text || data?.output?.[0]?.content?.[0]?.text;
+    if (!candidate) return 'Sorry, I could not generate a reply.';
+    return candidate;
+
   } catch (e) {
     console.warn('Gemini failed, switching to GitHub AI:', e.message);
     return queryGitHubAI(prompt);
   }
 }
 
-/* ---------------- GitHub AI ---------------- */
-const githubClient = new OpenAI({ apiKey: GITHUB_KEY });
+/* ---------------- GitHub AI fallback ---------------- */
+const githubClient = new OpenAI({ baseURL: "https://models.github.ai/inference", apiKey: GITHUB_TOKEN });
 
 async function queryGitHubAI(prompt) {
+  if (!GITHUB_TOKEN) return 'No GitHub AI token provided.';
   try {
     const response = await githubClient.chat.completions.create({
-      model: 'openai/gpt-4o', 
-      messages: [{ role: 'user', content: prompt }],
+      model: "openai/gpt-4o",
+      messages: [
+        { role: "system", content: "You are Luna, a playful, witty AI who loves strawberries and space." },
+        { role: "user", content: prompt }
+      ],
       temperature: 0.8,
       max_tokens: 300
     });
     return response.choices[0].message.content;
-  } catch (e) {
-    console.error('GitHub AI error:', e);
-    return 'I could not generate a response.';
+  } catch (err) {
+    console.error('GitHub AI error:', err);
+    return 'Sorry, I cannot generate a reply right now.';
   }
 }
 
 /* ---------------- Discord Bot ---------------- */
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent], partials: [Partials.Channel] });
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ],
+  partials: [Partials.Channel]
+});
 
 client.once('clientReady', () => console.log(`Discord bot ready as ${client.user.tag}`));
 
 const COOLDOWN = new Map();
-const RESPONSE_PROBABILITY = 1; // respond every message
-const USER_COOLDOWN_MS = 5000;
+const USER_COOLDOWN_MS = 15000;
 
 client.on('messageCreate', async message => {
   try {
     if (message.author.bot) return;
+    if (!message.mentions.has(client.user)) return; // respond only when mentioned
 
     const last = COOLDOWN.get(message.author.id) || 0;
     if (Date.now() - last < USER_COOLDOWN_MS) return;
@@ -146,7 +181,7 @@ client.on('messageCreate', async message => {
     const displayName = message.member?.nickname || message.author.username;
     const mems = await fetchRecentMemories(message.author.id);
     const memoryText = mems.map(m => `Memory: ${m}`).join('\n');
-    const fullPrompt = `You are "Luna", a playful, witty AI who loves strawberries and space.\nUser (${displayName}): ${message.content}\n${memoryText}`;
+    const fullPrompt = `User (${displayName}): ${message.content}\n${memoryText}`;
 
     const reply = await queryGemini(fullPrompt);
     await storeMemory(message.author.id, displayName, message.content);
@@ -158,4 +193,7 @@ client.on('messageCreate', async message => {
   }
 });
 
-client.login(DISCORD_TOKEN).catch(err => { console.error('Discord login failed:', err); process.exit(1); });
+client.login(DISCORD_TOKEN).catch(err => {
+  console.error('Discord login failed:', err);
+  process.exit(1);
+});
