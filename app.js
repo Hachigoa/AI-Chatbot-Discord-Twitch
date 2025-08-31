@@ -1,18 +1,19 @@
+// app.js
 import 'dotenv/config';
 import { Client, GatewayIntentBits, Partials } from 'discord.js';
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import fetch from 'node-fetch';
 import express from 'express';
-import OpenAI from 'openai'; // GitHub AI uses OpenAI package
-import pkg from 'google-auth-library';
-const { GoogleAuth } = pkg;
+import OpenAI from 'openai';
+import { GoogleAuth } from 'google-auth-library';
 
-/* ---------------- env ---------------- */
+/* ---------------- Environment ---------------- */
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_CREDENTIALS_JSON = process.env.GEMINI_CREDENTIALS_JSON;
-const GEMINI_MODEL_ENV = process.env.GEMINI_MODEL || '';
-const GITHUB_AI_TOKEN = process.env.GITHUB_AI_TOKEN; // personal access token
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'models/gemini-2.5-flash';
+const GITHUB_AI_TOKEN = process.env.GITHUB_AI_TOKEN;
+const PORT = process.env.PORT || 10000;
 
 if (!DISCORD_TOKEN || !GEMINI_CREDENTIALS_JSON || !GITHUB_AI_TOKEN) {
   console.error('Missing environment variables');
@@ -21,23 +22,10 @@ if (!DISCORD_TOKEN || !GEMINI_CREDENTIALS_JSON || !GITHUB_AI_TOKEN) {
 
 /* ---------------- Express ---------------- */
 const app = express();
-const PORT = process.env.PORT || 10000;
-
-// Status route: check if AI services are reachable
-app.get('/', async (req, res) => {
-  try {
-    // simple Gemini test
-    const token = await getGeminiToken();
-    if (!token) throw new Error('Gemini not ready');
-    res.send('Luna Discord Bot is running ✅ AI services connected');
-  } catch (e) {
-    res.send('Luna Discord Bot is running ⚠️ AI services not ready');
-  }
-});
-
+app.get('/', (req, res) => res.send('Luna Discord Bot is running'));
 app.listen(PORT, () => console.log(`Web server running on port ${PORT}`));
 
-/* ---------------- SQLite ---------------- */
+/* ---------------- SQLite memory ---------------- */
 let db;
 (async () => {
   db = await open({ filename: './memory.db', driver: sqlite3.Database });
@@ -65,38 +53,33 @@ async function fetchRecentMemories(userId, limit = 5) {
   } catch(e) { console.error('fetchRecentMemories error:', e); return []; }
 }
 
-/* ---------------- Gemini ---------------- */
+/* ---------------- Gemini API ---------------- */
 const credentials = JSON.parse(GEMINI_CREDENTIALS_JSON);
 const googleAuth = new GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/generative-language'] });
+
 let cachedToken = null;
 let tokenExpiresAt = 0;
-
-async function getGeminiToken() {
+async function getGeminiAccessToken() {
   const now = Date.now();
   if (cachedToken && now < tokenExpiresAt - 60000) return cachedToken;
   const client = await googleAuth.getClient();
   const tokenResponse = await client.getAccessToken();
   const token = typeof tokenResponse === 'string' ? tokenResponse : tokenResponse?.token;
+  if (!token) throw new Error('Failed to get Gemini access token');
   cachedToken = token;
-  tokenExpiresAt = Date.now() + 55 * 60 * 1000;
+  tokenExpiresAt = Date.now() + 55 * 60 * 1000; // cache 55 min
   return cachedToken;
 }
 
 async function queryGemini(prompt) {
   try {
-    const token = await getGeminiToken();
-    const model = GEMINI_MODEL_ENV || 'models/gemini-2.5-chat';
-    const url = `https://generativelanguage.googleapis.com/v1beta/${model}:chat`;
-
+    const token = await getGeminiAccessToken();
+    const url = `https://generativelanguage.googleapis.com/v1beta/${GEMINI_MODEL}:generateText`;
     const body = {
-      messages: [
-        { role: 'system', content: 'You are Luna, a playful and witty AI.' },
-        { role: 'user', content: prompt }
-      ],
+      text: prompt,
       temperature: 0.8,
-      maxOutputTokens: 500
+      maxOutputTokens: 300
     };
-
     const res = await fetch(url, {
       method: 'POST',
       headers: {
@@ -105,45 +88,42 @@ async function queryGemini(prompt) {
       },
       body: JSON.stringify(body)
     });
-
     if (!res.ok) {
       const txt = await res.text();
       console.error('Gemini API error:', res.status, txt);
-      throw new Error(txt);
+      throw new Error(`Gemini failed: ${txt}`);
     }
-
     const data = await res.json();
-    const reply = data?.candidates?.[0]?.content?.[0]?.text || data?.candidates?.[0]?.content?.text;
-    return reply || null;
-
-  } catch (e) {
+    return data?.candidates?.[0]?.content || 'Gemini could not generate a response.';
+  } catch(e) {
     console.warn('Gemini failed:', e.message);
-    return null;
+    throw e; // Let Discord bot handle fallback
   }
 }
 
-/* ---------------- GitHub AI fallback ---------------- */
-const githubClient = new OpenAI({ apiKey: GITHUB_AI_TOKEN });
+/* ---------------- GitHub AI ---------------- */
+const githubClient = new OpenAI({ apiKey: GITHUB_AI_TOKEN, baseURL: 'https://api.github.com' });
+
 async function queryGitHubAI(prompt) {
   try {
     const response = await githubClient.chat.completions.create({
       model: 'openai/gpt-4o',
-      messages: [
-        { role: 'system', content: 'You are Luna, a playful and witty AI.' },
-        { role: 'user', content: prompt }
-      ],
+      messages: [{ role: 'user', content: prompt }],
       temperature: 0.8,
-      max_tokens: 500
+      max_tokens: 300
     });
-    return response.choices[0].message.content;
-  } catch (e) {
-    console.error('GitHub AI error:', e);
-    return 'Sorry, I cannot generate a reply at this time.';
+    return response.choices?.[0]?.message?.content || 'GitHub AI could not generate a response.';
+  } catch(e) {
+    console.error('GitHub AI error:', e.message);
+    throw e;
   }
 }
 
 /* ---------------- Discord Bot ---------------- */
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent], partials: [Partials.Channel] });
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+  partials: [Partials.Channel]
+});
 
 client.once('clientReady', () => console.log(`Discord bot ready as ${client.user.tag}`));
 
@@ -164,17 +144,18 @@ client.on('messageCreate', async message => {
     const displayName = message.member?.nickname || message.author.username;
     const mems = await fetchRecentMemories(message.author.id);
     const memoryText = mems.map(m => `Memory: ${m}`).join('\n');
-    const fullPrompt = `User (${displayName}): ${message.content}\n${memoryText}`;
+    const fullPrompt = `You are "Luna", a playful AI.\nUser (${displayName}): ${message.content}\n${memoryText}`;
 
-    // Try Gemini first
-    let reply = await queryGemini(fullPrompt);
-    if (!reply) reply = await queryGitHubAI(fullPrompt); // fallback
+    // Try Gemini first, fallback to GitHub AI
+    let reply;
+    try { reply = await queryGemini(fullPrompt); }
+    catch { reply = await queryGitHubAI(fullPrompt); }
 
     await storeMemory(message.author.id, displayName, message.content);
     await storeMemory(message.author.id, displayName, `Luna: ${reply}`);
 
     await message.reply(reply);
-  } catch (e) { console.error('messageCreate error:', e); }
+  } catch(e) { console.error('messageCreate handler error:', e); }
 });
 
-client.login(DISCORD_TOKEN).catch(err => { console.error('Discord login failed:', err); process.exit(1); });
+client.login(DISCORD_TOKEN).catch(err => { console.error('Discord login failed:', err); process.exit(1); })
