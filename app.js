@@ -6,12 +6,14 @@ import { open } from 'sqlite';
 import fetch from 'node-fetch';
 import express from 'express';
 import pkg from 'google-auth-library';
+import OpenRouter from 'openrouter'; // <- puter.js / OpenRouter SDK
 const { GoogleAuth } = pkg;
 
 /* ---------------- env ---------------- */
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_CREDENTIALS_JSON = process.env.GEMINI_CREDENTIALS_JSON;
 const GEMINI_MODEL_ENV = process.env.GEMINI_MODEL || '';
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY; // Puter/OpenRouter key
 
 if (!DISCORD_TOKEN || !GEMINI_CREDENTIALS_JSON) {
   console.error('Missing environment variables');
@@ -70,26 +72,45 @@ async function getAccessToken() {
   return cachedToken;
 }
 
-/* ---------------- Gemini API ---------------- */
-async function queryGemini(prompt) {
+/* ---------------- Gemini + Puter Query ---------------- */
+const openRouterAI = new OpenRouter({ apiKey: OPENROUTER_API_KEY });
+
+async function queryGeminiOrPuter(prompt) {
   try {
+    // Try Gemini first
     const token = await getAccessToken();
     const model = GEMINI_MODEL_ENV || 'models/gemini-2.5-flash';
     const url = `https://generativelanguage.googleapis.com/v1beta/${model}:generateContent`;
     const body = { prompt: { text: prompt }, temperature: 0.8, maxOutputTokens: 300, candidateCount: 1 };
 
     const res = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    if (!res.ok) { console.error('Gemini API error:', res.status, await res.text()); return 'Sorry, I cannot reach the AI right now.'; }
+    if (!res.ok) throw new Error(`Gemini API error: ${res.status}`);
 
     const data = await res.json();
     const candidate = data?.candidates?.[0] || data?.response?.candidates?.[0];
-    if (!candidate) return 'Sorry, I could not generate a reply.';
+    if (!candidate) throw new Error('No candidate from Gemini');
 
     if (typeof candidate === 'string') return candidate;
     if (candidate?.content) return candidate.content;
     if (Array.isArray(candidate?.content)) return candidate.content.map(c => c.text || c).join('\n');
     return JSON.stringify(candidate).slice(0, 2000);
-  } catch(e) { console.error('queryGemini error:', e); return 'Sorry, I cannot reach the AI right now.'; }
+
+  } catch (gemError) {
+    console.warn('Gemini failed, falling back to Puter/OpenRouter:', gemError.message);
+
+    // Fallback to Puter/OpenRouter
+    if (!OPENROUTER_API_KEY) return 'Sorry, AI is unavailable right now.';
+    try {
+      const response = await openRouterAI.chat.completions.create({
+        model: 'gpt-4o-mini', // Puter default model
+        messages: [{ role: 'user', content: prompt }]
+      });
+      return response.choices[0].message.content;
+    } catch (putError) {
+      console.error('Puter fallback failed:', putError);
+      return 'Sorry, AI is unavailable right now.';
+    }
+  }
 }
 
 /* ---------------- Discord Bot ---------------- */
@@ -116,7 +137,7 @@ client.on('messageCreate', async message => {
     const memoryText = mems.map(m => `Memory: ${m}`).join('\n');
     const fullPrompt = `You are "Luna", a playful, witty AI who loves strawberries and space.\nUser (${displayName}): ${message.content}\n${memoryText}`;
 
-    const reply = await queryGemini(fullPrompt);
+    const reply = await queryGeminiOrPuter(fullPrompt);
     await storeMemory(message.author.id, displayName, message.content);
     await storeMemory(message.author.id, displayName, `Luna: ${reply}`);
 
