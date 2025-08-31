@@ -42,17 +42,23 @@ let db;
 
 async function storeMemory(userId, userName, content) {
   try {
-    await db.run(`INSERT INTO memories (user_id,user_name,content) VALUES(?,?,?)`, [userId, userName, content]);
-  } catch(e) {
+    await db.run(
+      `INSERT INTO memories (user_id, user_name, content) VALUES (?, ?, ?)`,
+      [userId, userName, content]
+    );
+  } catch (e) {
     console.error('storeMemory error:', e);
   }
 }
 
 async function fetchRecentMemories(userId, limit = 5) {
   try {
-    const rows = await db.all(`SELECT content FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`, [userId, limit]);
+    const rows = await db.all(
+      `SELECT content FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`,
+      [userId, limit]
+    );
     return rows.map(r => r.content).reverse();
-  } catch(e) {
+  } catch (e) {
     console.error('fetchRecentMemories error:', e);
     return [];
   }
@@ -60,11 +66,13 @@ async function fetchRecentMemories(userId, limit = 5) {
 
 /* ---------------- Google Auth (Gemini) ---------------- */
 const credentials = JSON.parse(GEMINI_CREDENTIALS_JSON);
-const googleAuth = new GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/generative-language'] });
+const googleAuth = new GoogleAuth({
+  credentials,
+  scopes: ['https://www.googleapis.com/auth/generative-language']
+});
 
 let cachedToken = null;
 let tokenExpiresAt = 0;
-
 async function getAccessToken() {
   const now = Date.now();
   if (cachedToken && now < tokenExpiresAt - 60000) return cachedToken;
@@ -112,20 +120,21 @@ async function queryGemini(prompt) {
     if (!candidate) return 'Sorry, I could not generate a reply.';
     return candidate;
 
-  } catch(e) {
+  } catch (e) {
     console.warn('Gemini failed, switching to Puter.js:', e.message);
+    // Replace with your actual Puter.js integration
     return `Puter.js fallback response: ${prompt}`;
   }
 }
 
 /* ---------------- Discord Bot ---------------- */
-const client = new Client({ 
+const client = new Client({
   intents: [
-    GatewayIntentBits.Guilds, 
-    GatewayIntentBits.GuildMessages, 
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent
-  ], 
-  partials: [Partials.Channel] 
+  ],
+  partials: [Partials.Channel]
 });
 
 client.once('clientReady', () => console.log(`Discord bot ready as ${client.user.tag}`));
@@ -145,8 +154,6 @@ client.on('messageCreate', async message => {
     if (Date.now() - last < USER_COOLDOWN_MS) return;
     COOLDOWN.set(message.author.id, Date.now());
 
-    if (Math.random() > RESPONSE_PROBABILITY) return;
-
     const displayName = message.member?.nickname || message.author.username;
     const mems = await fetchRecentMemories(message.author.id);
     const memoryText = mems.map(m => `Memory: ${m}`).join('\n');
@@ -157,7 +164,7 @@ client.on('messageCreate', async message => {
     await storeMemory(message.author.id, displayName, `Luna: ${reply}`);
 
     await message.reply(reply);
-  } catch(e) {
+  } catch (e) {
     console.error('messageCreate handler error:', e);
   }
 });
