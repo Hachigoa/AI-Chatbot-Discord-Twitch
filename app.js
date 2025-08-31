@@ -6,16 +6,22 @@ import { open } from 'sqlite';
 import fetch from 'node-fetch';
 import express from 'express';
 import pkg from 'google-auth-library';
+import OpenAI from 'openai';
 const { GoogleAuth } = pkg;
 
 /* ---------------- env ---------------- */
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_CREDENTIALS_JSON = process.env.GEMINI_CREDENTIALS_JSON;
 const GEMINI_MODEL_ENV = process.env.GEMINI_MODEL || '';
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
 if (!DISCORD_TOKEN || !GEMINI_CREDENTIALS_JSON) {
   console.error('Missing environment variables');
   process.exit(1);
+}
+
+if (!GITHUB_TOKEN) {
+  console.warn('GITHUB_TOKEN not set. GitHub AI fallback will not work.');
 }
 
 /* ---------------- Express ---------------- */
@@ -121,9 +127,30 @@ async function queryGemini(prompt) {
     return candidate;
 
   } catch (e) {
-    console.warn('Gemini failed, switching to Puter.js:', e.message);
-    // Replace with your actual Puter.js integration
-    return `Puter.js fallback response: ${prompt}`;
+    console.warn('Gemini failed, switching to GitHub AI:', e.message);
+    return queryGitHubAI(prompt);
+  }
+}
+
+/* ---------------- GitHub AI fallback ---------------- */
+const githubClient = new OpenAI({ baseURL: "https://models.github.ai/inference", apiKey: GITHUB_TOKEN });
+
+async function queryGitHubAI(prompt) {
+  if (!GITHUB_TOKEN) return 'No GitHub AI token provided.';
+  try {
+    const response = await githubClient.chat.completions.create({
+      model: "openai/gpt-4o",
+      messages: [
+        { role: "system", content: "You are Luna, a playful, witty AI who loves strawberries and space." },
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.8,
+      max_tokens: 300
+    });
+    return response.choices[0].message.content;
+  } catch (err) {
+    console.error('GitHub AI error:', err);
+    return 'Sorry, I cannot generate a reply right now.';
   }
 }
 
@@ -140,15 +167,12 @@ const client = new Client({
 client.once('clientReady', () => console.log(`Discord bot ready as ${client.user.tag}`));
 
 const COOLDOWN = new Map();
-const RESPONSE_PROBABILITY = 0.25;
 const USER_COOLDOWN_MS = 15000;
 
 client.on('messageCreate', async message => {
   try {
     if (message.author.bot) return;
-
-    // Only respond when bot is mentioned
-    if (!message.mentions.has(client.user)) return;
+    if (!message.mentions.has(client.user)) return; // respond only when mentioned
 
     const last = COOLDOWN.get(message.author.id) || 0;
     if (Date.now() - last < USER_COOLDOWN_MS) return;
@@ -157,7 +181,7 @@ client.on('messageCreate', async message => {
     const displayName = message.member?.nickname || message.author.username;
     const mems = await fetchRecentMemories(message.author.id);
     const memoryText = mems.map(m => `Memory: ${m}`).join('\n');
-    const fullPrompt = `You are "Luna", a playful, witty AI who loves strawberries and space.\nUser (${displayName}): ${message.content}\n${memoryText}`;
+    const fullPrompt = `User (${displayName}): ${message.content}\n${memoryText}`;
 
     const reply = await queryGemini(fullPrompt);
     await storeMemory(message.author.id, displayName, message.content);
