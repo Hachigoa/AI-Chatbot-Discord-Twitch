@@ -1,9 +1,9 @@
-// app.js - Luna Discord Bot with Gemini + GitHub AI
+// app.js - Luna Discord Bot with Gemini + GitHub AI using sqlite3
 
 import 'dotenv/config';
 import { Client, GatewayIntentBits } from 'discord.js';
 import { OpenAI } from 'openai';
-import Database from 'better-sqlite3';
+import sqlite3 from 'sqlite3';
 import express from 'express';
 
 // === Load environment variables ===
@@ -34,32 +34,38 @@ const githubAI = new OpenAI({
 });
 
 // === Initialize SQLite database ===
-const db = new Database('memory.db');
-db.prepare(`
+const db = new sqlite3.Database('./memory.db', (err) => {
+  if (err) console.error('Database opening error:', err);
+  else console.log('Connected to SQLite database');
+});
+
+// Create memory table if not exists
+db.run(`
   CREATE TABLE IF NOT EXISTS memory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT,
     user_message TEXT,
     bot_reply TEXT
   )
-`).run();
+`);
 
 // === Helper to fetch recent conversation ===
 function getConversationHistory(userId, limit = 5) {
-  const rows = db.prepare(`
-    SELECT user_message, bot_reply 
-    FROM memory 
-    WHERE user_id = ? 
-    ORDER BY id DESC 
-    LIMIT ?
-  `).all(userId, limit);
-  
-  const history = [];
-  for (let i = rows.length - 1; i >= 0; i--) {
-    history.push({ role: 'user', content: rows[i].user_message });
-    history.push({ role: 'assistant', content: rows[i].bot_reply });
-  }
-  return history;
+  return new Promise((resolve, reject) => {
+    db.all(
+      `SELECT user_message, bot_reply FROM memory WHERE user_id = ? ORDER BY id DESC LIMIT ?`,
+      [userId, limit],
+      (err, rows) => {
+        if (err) return reject(err);
+        const history = [];
+        for (let i = rows.length - 1; i >= 0; i--) {
+          history.push({ role: 'user', content: rows[i].user_message });
+          history.push({ role: 'assistant', content: rows[i].bot_reply });
+        }
+        resolve(history);
+      }
+    );
+  });
 }
 
 // === Discord client ===
@@ -76,7 +82,7 @@ client.on('messageCreate', async (message) => {
   if (message.author.bot) return; // Ignore bots
 
   const systemPrompt = { role: 'system', content: 'You are Luna, a friendly and witty AI assistant.' };
-  const history = getConversationHistory(message.author.id, 5);
+  const history = await getConversationHistory(message.author.id, 5);
   const userPrompt = { role: 'user', content: message.content };
   const messages = [systemPrompt, ...history, userPrompt];
 
@@ -85,7 +91,7 @@ client.on('messageCreate', async (message) => {
   // Try Gemini first
   try {
     const response = await gemini.chat.completions.create({
-      model: 'gemini-2.5-pro', // Replace with your Gemini model
+      model: 'gemini-2.5-pro',
       messages: messages
     });
     replyContent = response.choices[0].message.content;
@@ -95,7 +101,7 @@ client.on('messageCreate', async (message) => {
     // Fallback to GitHub AI
     try {
       const response2 = await githubAI.chat.completions.create({
-        model: 'openai/gpt-4o', // Example GitHub model
+        model: 'openai/gpt-4o',
         messages: messages
       });
       replyContent = response2.choices[0].message.content;
@@ -109,10 +115,13 @@ client.on('messageCreate', async (message) => {
   message.reply(replyContent).catch(console.error);
 
   // Store conversation in memory
-  db.prepare(`
-    INSERT INTO memory (user_id, user_message, bot_reply)
-    VALUES (?, ?, ?)
-  `).run(message.author.id, message.content, replyContent);
+  db.run(
+    `INSERT INTO memory (user_id, user_message, bot_reply) VALUES (?, ?, ?)`,
+    [message.author.id, message.content, replyContent],
+    (err) => {
+      if (err) console.error('Database insert error:', err);
+    }
+  );
 });
 
 // === Express status route ===
