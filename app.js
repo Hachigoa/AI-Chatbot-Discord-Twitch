@@ -402,3 +402,4 @@ client.login(DISCORD_TOKEN).catch(err => {
   console.error('Discord login failed:', err);
   process.exit(1);
 });
+
