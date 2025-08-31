@@ -81,48 +81,47 @@ const credentials = (() => {
 
 const googleAuth = new GoogleAuth({
   credentials,
-  scopes: ['https://www.googleapis.com/auth/cloud-platform']
+  scopes: ['https://www.googleapis.com/auth/generative-language'] // ✅ fixed scope
 });
 
 let cachedToken = null;
 let tokenExpiresAt = 0;
 
-// get a valid access token, with simple caching
 async function getAccessToken() {
   const now = Date.now();
-  if (cachedToken && now < tokenExpiresAt - 60 * 1000) { // refresh 60s before expiry
+  if (cachedToken && now < tokenExpiresAt - 60 * 1000) {
     return cachedToken;
   }
 
   const client = await googleAuth.getClient();
-  // client.getAccessToken() may return a string or an object { token }
   const tokenResponse = await client.getAccessToken();
   const token = typeof tokenResponse === 'string' ? tokenResponse : tokenResponse?.token;
 
   if (!token) throw new Error('Failed to obtain access token from Google auth client');
 
-  // token lifetime isn't given directly here; we'll conservatively set expiry to 55 minutes
   cachedToken = token;
   tokenExpiresAt = Date.now() + 55 * 60 * 1000;
   return cachedToken;
 }
 
+/* ---------------- Gemini Query ---------------- */
 async function queryGemini(prompt) {
   try {
     const token = await getAccessToken();
-    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent';
 
     const body = {
-      prompt: { text: prompt },
-      temperature: 0.8,
-      maxOutputTokens: 300,
-      candidateCount: 1
+      contents: [
+        {
+          parts: [{ text: prompt }]
+        }
+      ]
     };
 
     const res = await fetch(url, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${token}`, // ✅ works with correct scope now
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(body)
@@ -135,24 +134,7 @@ async function queryGemini(prompt) {
     }
 
     const data = await res.json();
-    // Candidate parsing: API formats can change; handle common shapes
-    const candidate = data?.candidates?.[0] || data?.response?.candidates?.[0];
-    if (!candidate) {
-      console.warn('No candidate in Gemini response:', data);
-      return "Sorry, I couldn't generate a reply.";
-    }
-
-    // candidate may contain text in different paths
-    const content = candidate?.content || candidate?.output || candidate?.text || candidate?.message || null;
-    // try common nested shapes
-    if (typeof content === 'string') return content;
-    if (Array.isArray(content) && content.length) {
-      // sometimes response has array of content pieces
-      if (typeof content[0] === 'string') return content.join('\n');
-      if (content[0]?.text) return content.map(c => c.text).join('\n');
-    }
-    // fallback: stringify candidate
-    return (candidate?.content || candidate?.output || JSON.stringify(candidate)).toString();
+    return data?.candidates?.[0]?.content?.parts?.[0]?.text || "No response from Gemini";
   } catch (e) {
     console.error('queryGemini error:', e);
     return 'Sorry, I cannot reach the AI right now.';
@@ -176,6 +158,7 @@ const USER_COOLDOWN_MS = 15_000;
 client.on('messageCreate', async message => {
   try {
     if (message.author.bot) return;
+
     const isMention = message.mentions.has(client.user);
     const isAutonomous = !isMention && Math.random() < RESPONSE_PROBABILITY;
     if (!isMention && !isAutonomous) return;
@@ -201,4 +184,3 @@ client.login(DISCORD_TOKEN).catch(err => {
   console.error('Discord login failed:', err);
   process.exit(1);
 });
-
