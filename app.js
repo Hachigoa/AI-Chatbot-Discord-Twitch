@@ -20,10 +20,6 @@ if (!DISCORD_TOKEN || !GEMINI_CREDENTIALS_JSON) {
   process.exit(1);
 }
 
-if (!GITHUB_TOKEN) {
-  console.warn('GITHUB_TOKEN not set. GitHub AI fallback will not work.');
-}
-
 /* ---------------- Express ---------------- */
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -164,7 +160,7 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-client.once('clientReady', () => console.log(`Discord bot ready as ${client.user.tag}`));
+client.once('ready', () => console.log(`Discord bot ready as ${client.user.tag}`));
 
 const COOLDOWN = new Map();
 const USER_COOLDOWN_MS = 15000;
@@ -172,8 +168,8 @@ const USER_COOLDOWN_MS = 15000;
 client.on('messageCreate', async message => {
   try {
     if (message.author.bot) return;
-    if (!message.mentions.has(client.user)) return; // respond only when mentioned
 
+    // cooldown per user
     const last = COOLDOWN.get(message.author.id) || 0;
     if (Date.now() - last < USER_COOLDOWN_MS) return;
     COOLDOWN.set(message.author.id, Date.now());
