@@ -8,14 +8,13 @@ import express from 'express';
 import pkg from 'google-auth-library';
 const { GoogleAuth } = pkg;
 
-/* ---------------- ENV ---------------- */
+/* ---------------- env ---------------- */
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const GEMINI_CREDENTIALS_JSON = process.env.GEMINI_CREDENTIALS_JSON;
 const GEMINI_MODEL_ENV = process.env.GEMINI_MODEL || '';
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 if (!DISCORD_TOKEN || !GEMINI_CREDENTIALS_JSON) {
-  console.error('Missing required environment variables');
+  console.error('Missing environment variables');
   process.exit(1);
 }
 
@@ -25,7 +24,7 @@ const PORT = process.env.PORT || 10000;
 app.get('/', (req, res) => res.send('Luna Discord Bot is running'));
 app.listen(PORT, () => console.log(`Web server running on port ${PORT}`));
 
-/* ---------------- SQLite Memory ---------------- */
+/* ---------------- SQLite memory ---------------- */
 let db;
 (async () => {
   db = await open({ filename: './memory.db', driver: sqlite3.Database });
@@ -42,122 +41,79 @@ let db;
 })();
 
 async function storeMemory(userId, userName, content) {
-  try {
-    await db.run(
-      `INSERT INTO memories (user_id,user_name,content) VALUES(?,?,?)`,
-      [userId, userName, content]
-    );
-  } catch (e) {
-    console.error('storeMemory error:', e);
-  }
+  try { await db.run(`INSERT INTO memories (user_id,user_name,content) VALUES(?,?,?)`, [userId, userName, content]); }
+  catch(e) { console.error('storeMemory error:', e); }
 }
 
 async function fetchRecentMemories(userId, limit = 5) {
   try {
-    const rows = await db.all(
-      `SELECT content FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`,
-      [userId, limit]
-    );
+    const rows = await db.all(`SELECT content FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`, [userId, limit]);
     return rows.map(r => r.content).reverse();
-  } catch (e) {
-    console.error('fetchRecentMemories error:', e);
-    return [];
-  }
+  } catch(e) { console.error('fetchRecentMemories error:', e); return []; }
 }
 
 /* ---------------- Google Auth (Gemini) ---------------- */
 const credentials = JSON.parse(GEMINI_CREDENTIALS_JSON);
-const googleAuth = new GoogleAuth({
-  credentials,
-  scopes: ['https://www.googleapis.com/auth/generative-language']
-});
+const googleAuth = new GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/generative-language'] });
 
 let cachedToken = null;
 let tokenExpiresAt = 0;
-async function getGeminiToken() {
+async function getAccessToken() {
   const now = Date.now();
-  if (cachedToken && now < tokenExpiresAt - 60_000) return cachedToken;
+  if (cachedToken && now < tokenExpiresAt - 60000) return cachedToken;
   const client = await googleAuth.getClient();
   const tokenResponse = await client.getAccessToken();
   const token = typeof tokenResponse === 'string' ? tokenResponse : tokenResponse?.token;
-  if (!token) throw new Error('Failed to get Gemini token');
+  if (!token) throw new Error('Failed to get token');
   cachedToken = token;
   tokenExpiresAt = Date.now() + 55 * 60 * 1000;
-  return token;
+  return cachedToken;
 }
 
-/* ---------------- Gemini Query ---------------- */
+/* ---------------- Gemini API ---------------- */
 async function queryGemini(prompt) {
   try {
-    const token = await getGeminiToken();
+    const token = await getAccessToken();
     const model = GEMINI_MODEL_ENV || 'models/gemini-2.5-flash';
     const url = `https://generativelanguage.googleapis.com/v1beta/${model}:generateContent`;
-    const body = { prompt: { text: prompt }, temperature: 0.8, maxOutputTokens: 300, candidateCount: 1 };
+    const body = { 
+      prompt: { text: prompt }, 
+      temperature: 0.8, 
+      maxOutputTokens: 300, 
+      candidateCount: 1 
+    };
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-
+    const res = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!res.ok) {
       const txt = await res.text();
-      console.warn('Gemini API error:', res.status, txt);
-      throw new Error(txt);
+      console.error('Gemini API error:', res.status, txt);
+      // Throw so fallback triggers
+      throw new Error(`Gemini failed: ${txt}`);
     }
 
     const data = await res.json();
     const candidate = data?.candidates?.[0] || data?.response?.candidates?.[0];
-    if (!candidate) return null;
-
+    if (!candidate) return 'Sorry, I could not generate a reply.';
     if (typeof candidate === 'string') return candidate;
     if (candidate?.content) return candidate.content;
     if (Array.isArray(candidate?.content)) return candidate.content.map(c => c.text || c).join('\n');
     return JSON.stringify(candidate).slice(0, 2000);
-  } catch (e) {
-    console.error('queryGemini error:', e.message);
-    return null;
-  }
-}
 
-/* ---------------- OpenRouter Fallback ---------------- */
-async function queryOpenRouter(prompt) {
-  try {
-    if (!OPENROUTER_API_KEY) return 'OpenRouter API key not set.';
-    const res = await fetch('https://api.openrouter.ai/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }]
-      })
-    });
-
-    if (!res.ok) {
-      const txt = await res.text();
-      console.warn('OpenRouter API error:', res.status, txt);
-      return 'Sorry, I cannot reach the AI right now.';
-    }
-
-    const data = await res.json();
-    return data?.choices?.[0]?.message?.content || 'Sorry, no response.';
-  } catch (e) {
-    console.error('queryOpenRouter error:', e.message);
-    return 'Sorry, I cannot reach the AI right now.';
+  } catch(e) {
+    console.warn('Gemini failed, switching to Puter.js:', e.message);
+    // Puter.js fallback (replace with real Puter.js import)
+    return `Puter.js fallback response: ${prompt}`;
   }
 }
 
 /* ---------------- Discord Bot ---------------- */
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
-  partials: [Partials.Channel]
-});
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent], partials: [Partials.Channel] });
 
 client.once('ready', () => console.log(`Discord bot ready as ${client.user.tag}`));
 
 const COOLDOWN = new Map();
 const RESPONSE_PROBABILITY = 0.25;
-const USER_COOLDOWN_MS = 15_000;
+const USER_COOLDOWN_MS = 15000;
 
 client.on('messageCreate', async message => {
   try {
@@ -167,25 +123,19 @@ client.on('messageCreate', async message => {
     if (Date.now() - last < USER_COOLDOWN_MS) return;
     COOLDOWN.set(message.author.id, Date.now());
 
-    if (Math.random() > RESPONSE_PROBABILITY) return;
+    if (Math.random() > RESPONSE_PROBABILITY) return; // simple probability
 
     const displayName = message.member?.nickname || message.author.username;
     const mems = await fetchRecentMemories(message.author.id);
     const memoryText = mems.map(m => `Memory: ${m}`).join('\n');
     const fullPrompt = `You are "Luna", a playful, witty AI who loves strawberries and space.\nUser (${displayName}): ${message.content}\n${memoryText}`;
 
-    // First try Gemini
-    let reply = await queryGemini(fullPrompt);
-    // If Gemini fails, fallback to OpenRouter
-    if (!reply) reply = await queryOpenRouter(fullPrompt);
-
+    const reply = await queryGemini(fullPrompt);
     await storeMemory(message.author.id, displayName, message.content);
     await storeMemory(message.author.id, displayName, `Luna: ${reply}`);
 
     await message.reply(reply);
-  } catch (e) {
-    console.error('messageCreate handler error:', e);
-  }
+  } catch(e) { console.error('messageCreate handler error:', e); }
 });
 
 client.login(DISCORD_TOKEN).catch(err => { console.error('Discord login failed:', err); process.exit(1); });
