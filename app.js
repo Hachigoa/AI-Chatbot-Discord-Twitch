@@ -6,7 +6,6 @@ import { open } from 'sqlite';
 import fetch from 'node-fetch';
 import pkg from 'google-auth-library';
 import OpenAI from 'openai';
-import keep_alive from './keep_alive.js'
 
 const { GoogleAuth } = pkg;
 
