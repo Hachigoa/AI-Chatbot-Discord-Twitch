@@ -1,6 +1,6 @@
 {
   "name": "luna-discord-bot",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "type": "module",
   "scripts": {
     "start": "node app.js"
@@ -12,6 +12,7 @@
     "node-fetch": "^3.3.2",
     "express": "^4.18.2",
     "dotenv": "^16.3.1",
-    "google-auth-library": "^9.0.0"
+    "google-auth-library": "^9.0.0",
+    "openai": "^5.2.0"
   }
 }
