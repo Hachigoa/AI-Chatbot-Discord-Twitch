@@ -1,4 +1,4 @@
-// app.js - Luna Discord Bot with Gemini + GitHub AI + Memory
+// app.js - Luna Discord Bot "Neuro-sama Style"
 import 'dotenv/config';
 import { Client, GatewayIntentBits, Partials } from 'discord.js';
 import sqlite3 from 'sqlite3';
@@ -24,7 +24,7 @@ if (!DISCORD_TOKEN || !GEMINI_CREDENTIALS_JSON) {
 // --- Express for uptime ---
 const app = express();
 const PORT = process.env.PORT || 10000;
-app.get('/', (req, res) => res.send("Luna Discord Bot is running"));
+app.get('/', (req, res) => res.send("Luna Discord Bot is alive 🌟"));
 app.listen(PORT, () => console.log(`Web server running on port ${PORT}`));
 
 // --- SQLite Memory Setup ---
@@ -37,6 +37,8 @@ let db;
       user_id TEXT,
       user_name TEXT,
       content TEXT,
+      mood TEXT,
+      personality TEXT,
       response TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -44,11 +46,12 @@ let db;
   console.log('Connected to SQLite database');
 })();
 
-async function storeMemory(userId, userName, content, response) {
+// --- Memory Functions ---
+async function storeMemory(userId, userName, content, mood, personality, response) {
   try {
     await db.run(
-      `INSERT INTO memories (user_id, user_name, content, response) VALUES (?, ?, ?, ?)`,
-      [userId, userName, content, response]
+      `INSERT INTO memories (user_id, user_name, content, mood, personality, response) VALUES (?, ?, ?, ?, ?, ?)`,
+      [userId, userName, content, mood, personality, response]
     );
   } catch (e) {
     console.error('storeMemory error:', e);
@@ -58,10 +61,12 @@ async function storeMemory(userId, userName, content, response) {
 async function fetchRecentMemories(userId, limit = 5) {
   try {
     const rows = await db.all(
-      `SELECT content, response FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`,
+      `SELECT content, mood, personality, response FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`,
       [userId, limit]
     );
-    return rows.reverse().map(r => `User: ${r.content}\nLuna: ${r.response}`).join('\n');
+    return rows.reverse().map(r =>
+      `User (Mood: ${r.mood}, Personality: ${r.personality}): ${r.content}\nLuna: ${r.response}`
+    ).join('\n');
   } catch (e) {
     console.error('fetchRecentMemories error:', e);
     return '';
@@ -97,7 +102,7 @@ async function queryGemini(prompt) {
     const body = {
       messages: [{ author: "user", content: [{ type: "text", text: prompt }] }],
       temperature: 0.8,
-      maxOutputTokens: 300
+      maxOutputTokens: 400
     };
     const res = await fetch(url, {
       method: "POST",
@@ -110,7 +115,7 @@ async function queryGemini(prompt) {
       throw new Error(`Gemini failed: ${txt}`);
     }
     const data = await res.json();
-    return data?.candidates?.[0]?.content?.[0]?.text || data?.output?.[0]?.content?.[0]?.text || "I could not generate a reply.";
+    return data?.candidates?.[0]?.content?.[0]?.text || data?.output?.[0]?.content?.[0]?.text || "I couldn't generate a reply.";
   } catch (e) {
     console.warn('Gemini failed, switching to GitHub AI:', e.message);
     return queryGitHubAI(prompt);
@@ -126,11 +131,11 @@ async function queryGitHubAI(prompt) {
     const response = await githubClient.chat.completions.create({
       model: "openai/gpt-4o",
       messages: [
-        { role: "system", content: "You are Luna, a playful, witty AI who loves strawberries and space." },
+        { role: "system", content: "You are Luna, a playful, witty AI who loves strawberries and space. Remember user personality, mood, and context for a Neuro-sama style interaction." },
         { role: "user", content: prompt }
       ],
       temperature: 0.8,
-      max_tokens: 300
+      max_tokens: 400
     });
     return response.choices[0].message.content;
   } catch (err) {
@@ -153,13 +158,13 @@ const client = new Client({
 client.once('ready', () => console.log(`Discord bot ready as ${client.user.tag}`));
 
 const COOLDOWN = new Map();
-const USER_COOLDOWN_MS = 15000;
+const USER_COOLDOWN_MS = 5000; // faster for Neuro-sama style
 
 client.on('messageCreate', async message => {
   try {
     if (message.author.bot) return;
 
-    // Detect mention or name-calling
+    // Detect mention or name
     const mentioned = message.mentions.users.has(client.user.id);
     const calledByName = message.content.toLowerCase().includes('luna');
     if (!mentioned && !calledByName) return;
@@ -170,12 +175,25 @@ client.on('messageCreate', async message => {
 
     const displayName = message.member?.nickname || message.author.username;
     const recentMemories = await fetchRecentMemories(message.author.id);
-    const fullPrompt = `User (${displayName}): ${message.content}\n${recentMemories}`;
+
+    // Include personality/mood detection prompt
+    const fullPrompt = `
+User (${displayName}): ${message.content}
+Recent Memories:
+${recentMemories}
+
+Please also assess the user's current mood and personality for context. Respond in a natural, playful, Neuro-sama style, remembering prior conversations.
+`;
 
     const reply = await queryGemini(fullPrompt);
-    await storeMemory(message.author.id, displayName, message.content, reply);
 
+    // Extract mood/personality if needed (simplified)
+    const mood = 'neutral';
+    const personality = 'friendly';
+
+    await storeMemory(message.author.id, displayName, message.content, mood, personality, reply);
     await message.reply(reply);
+
   } catch (e) {
     console.error('messageCreate handler error:', e);
   }
