@@ -41,15 +41,21 @@ let db;
 })();
 
 async function storeMemory(userId, userName, content) {
-  try { await db.run(`INSERT INTO memories (user_id,user_name,content) VALUES(?,?,?)`, [userId, userName, content]); }
-  catch(e) { console.error('storeMemory error:', e); }
+  try { 
+    await db.run(`INSERT INTO memories (user_id,user_name,content) VALUES(?,?,?)`, [userId, userName, content]); 
+  } catch(e) { 
+    console.error('storeMemory error:', e); 
+  }
 }
 
 async function fetchRecentMemories(userId, limit = 5) {
   try {
     const rows = await db.all(`SELECT content FROM memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?`, [userId, limit]);
     return rows.map(r => r.content).reverse();
-  } catch(e) { console.error('fetchRecentMemories error:', e); return []; }
+  } catch(e) { 
+    console.error('fetchRecentMemories error:', e); 
+    return []; 
+  }
 }
 
 /* ---------------- Google Auth (Gemini) ---------------- */
@@ -83,11 +89,15 @@ async function queryGemini(prompt) {
       candidateCount: 1 
     };
 
-    const res = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const res = await fetch(url, { 
+      method: 'POST', 
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, 
+      body: JSON.stringify(body) 
+    });
+
     if (!res.ok) {
       const txt = await res.text();
       console.error('Gemini API error:', res.status, txt);
-      // Throw so fallback triggers
       throw new Error(`Gemini failed: ${txt}`);
     }
 
@@ -101,41 +111,56 @@ async function queryGemini(prompt) {
 
   } catch(e) {
     console.warn('Gemini failed, switching to Puter.js:', e.message);
-    // Puter.js fallback (replace with real Puter.js import)
+    // Puter.js fallback
     return `Puter.js fallback response: ${prompt}`;
   }
 }
 
 /* ---------------- Discord Bot ---------------- */
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent], partials: [Partials.Channel] });
+const client = new Client({ 
+  intents: [
+    GatewayIntentBits.Guilds, 
+    GatewayIntentBits.GuildMessages, 
+    GatewayIntentBits.MessageContent
+  ], 
+  partials: [Partials.Channel] 
+});
 
 client.once('ready', () => console.log(`Discord bot ready as ${client.user.tag}`));
 
 const COOLDOWN = new Map();
-const RESPONSE_PROBABILITY = 0.25;
+const RESPONSE_PROBABILITY = 0.25; // Random replies for fun
 const USER_COOLDOWN_MS = 15000;
 
 client.on('messageCreate', async message => {
   try {
     if (message.author.bot) return;
 
+    // Check cooldown
     const last = COOLDOWN.get(message.author.id) || 0;
     if (Date.now() - last < USER_COOLDOWN_MS) return;
     COOLDOWN.set(message.author.id, Date.now());
-
-    if (Math.random() > RESPONSE_PROBABILITY) return; // simple probability
 
     const displayName = message.member?.nickname || message.author.username;
     const mems = await fetchRecentMemories(message.author.id);
     const memoryText = mems.map(m => `Memory: ${m}`).join('\n');
     const fullPrompt = `You are "Luna", a playful, witty AI who loves strawberries and space.\nUser (${displayName}): ${message.content}\n${memoryText}`;
 
+    // Respond if bot is mentioned OR random probability triggers
+    const botMentioned = message.mentions.has(client.user);
+    if (!botMentioned && Math.random() > RESPONSE_PROBABILITY) return;
+
     const reply = await queryGemini(fullPrompt);
     await storeMemory(message.author.id, displayName, message.content);
     await storeMemory(message.author.id, displayName, `Luna: ${reply}`);
 
     await message.reply(reply);
-  } catch(e) { console.error('messageCreate handler error:', e); }
+  } catch(e) {
+    console.error('messageCreate handler error:', e);
+  }
 });
 
-client.login(DISCORD_TOKEN).catch(err => { console.error('Discord login failed:', err); process.exit(1); });
+client.login(DISCORD_TOKEN).catch(err => { 
+  console.error('Discord login failed:', err); 
+  process.exit(1); 
+});
